@@ -1,0 +1,301 @@
+/**
+ * Webhook / notification layer — SubscriptionManager.
+ *
+ * External consumers (Telegram bots, Twitter bots, dashboards) register
+ * interest patterns and receive HTTP POST callbacks whenever a matching
+ * on-chain event is indexed.
+ *
+ * Pattern matching (all fields optional, ANDed):
+ *   contract   — exact case-insensitive address match
+ *   eventName  — exact event name match  (e.g. 'Swapped', 'SwapExecuted')
+ *   minAmount  — minimum amount in the decoded JSON (field 'amount' or 'amount0In')
+ *
+ * Delivery:
+ *   - HTTP POST with JSON body (fetch-based, 5s timeout)
+ *   - 3 retries with exponential backoff (1s → 2s → 4s)
+ *   - Fire-and-forget: dispatch() is synchronous, delivery is async
+ *
+ * In-memory broadcast:
+ *   - SubscriptionManager extends EventEmitter; emits 'broadcast' on dispatch()
+ *   - Attach listeners for WebSocket forwarding or in-process consumers
+ *
+ * WebSocket support:
+ *   - startBroadcastServer(port) starts a minimal Node.js HTTP server that
+ *     upgrades connections and broadcasts each dispatched event as JSON text
+ *   - stopBroadcastServer() tears it down
+ */
+
+import { EventEmitter } from 'node:events';
+import { createServer } from 'node:http';
+import { createHash } from 'node:crypto';
+import type { IncomingMessage, ServerResponse, Server } from 'node:http';
+import type { Duplex } from 'node:stream';
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+/** Filter criteria for a webhook subscription. All fields optional (AND logic). */
+export interface EventPattern {
+  /** If set, only match events from this contract address (case-insensitive). */
+  contract?: string;
+  /** If set, only match events with this exact event name. */
+  eventName?: string;
+  /**
+   * If set, only match events where the decoded JSON contains an 'amount' or
+   * 'amount0In' field >= minAmount.
+   */
+  minAmount?: bigint;
+}
+
+/** Normalized on-chain event for webhook delivery. */
+export interface WebhookEvent {
+  blockNumber: number;
+  txHash: string;
+  contractAddress: string;
+  eventName: string;
+  decodedJson: string | null;
+}
+
+/** A registered subscription. */
+export interface Subscription {
+  id: string;
+  pattern: EventPattern;
+  callbackUrl: string;
+}
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const RETRY_BASE_DELAY_MS = 1_000;
+const MAX_RETRIES = 3;
+const FETCH_TIMEOUT_MS = 5_000;
+
+/** WebSocket handshake magic GUID (RFC 6455). */
+const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+
+// ---------------------------------------------------------------------------
+// SubscriptionManager
+// ---------------------------------------------------------------------------
+
+export class SubscriptionManager extends EventEmitter {
+  private readonly _subs = new Map<string, Subscription>();
+  private _idCounter = 0;
+  private _httpServer: Server | null = null;
+  private readonly _wsClients = new Set<Duplex>();
+
+  // ── Registration ──────────────────────────────────────────────────────────
+
+  register(pattern: EventPattern, callbackUrl: string): string {
+    const id = `sub_${++this._idCounter}`;
+    this._subs.set(id, { id, pattern, callbackUrl });
+    return id;
+  }
+
+  unregister(subscriptionId: string): boolean {
+    return this._subs.delete(subscriptionId);
+  }
+
+  get subscriptionCount(): number {
+    return this._subs.size;
+  }
+
+  getSubscriptions(): Subscription[] {
+    return [...this._subs.values()];
+  }
+
+  // ── Pattern matching ──────────────────────────────────────────────────────
+
+  matchesPattern(pattern: EventPattern, event: WebhookEvent): boolean {
+    if (
+      pattern.contract !== undefined &&
+      pattern.contract.toLowerCase() !== event.contractAddress.toLowerCase()
+    ) {
+      return false;
+    }
+
+    if (pattern.eventName !== undefined && pattern.eventName !== event.eventName) {
+      return false;
+    }
+
+    if (pattern.minAmount !== undefined) {
+      if (!event.decodedJson) return false;
+      try {
+        const parsed = JSON.parse(event.decodedJson) as Record<string, unknown>;
+        const raw =
+          (parsed['amount'] as string | undefined) ??
+          (parsed['amount0In'] as string | undefined) ??
+          '0';
+        const amount = BigInt(raw);
+        if (amount < pattern.minAmount) return false;
+      } catch {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  // ── Dispatch ─────────────────────────────────────────────────────────────
+
+  dispatch(event: WebhookEvent): void {
+    this.emit('broadcast', event);
+
+    if (this._wsClients.size > 0) {
+      const json = JSON.stringify(event);
+      const frame = this._encodeWsTextFrame(json);
+      for (const client of this._wsClients) {
+        try {
+          client.write(frame);
+        } catch {
+          this._wsClients.delete(client);
+        }
+      }
+    }
+
+    for (const sub of this._subs.values()) {
+      if (this.matchesPattern(sub.pattern, event)) {
+        void this._deliverWithRetry(sub.callbackUrl, event, 1);
+      }
+    }
+  }
+
+  // ── HTTP delivery with retry ──────────────────────────────────────────────
+
+  /** @internal exposed for testing */
+  async _deliverWithRetry(
+    url: string,
+    event: WebhookEvent,
+    attempt: number,
+  ): Promise<void> {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(event),
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status} ${res.statusText}`);
+      }
+    } catch (err) {
+      if (attempt <= MAX_RETRIES) {
+        const delayMs = RETRY_BASE_DELAY_MS * 2 ** (attempt - 1);
+        await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+        return this._deliverWithRetry(url, event, attempt + 1);
+      }
+      this.emit('deliveryFailed', { url, event, error: err instanceof Error ? err.message : String(err), attempts: attempt });
+    }
+  }
+
+  // ── WebSocket broadcast server ─────────────────────────────────────────────
+
+  startBroadcastServer(port: number): void {
+    if (this._httpServer) return;
+
+    this._httpServer = createServer((_req: IncomingMessage, res: ServerResponse) => {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('OpStream WebSocket broadcast server\n');
+    });
+
+    this._httpServer.on('upgrade', (req: IncomingMessage, socket: Duplex) => {
+      const key = req.headers['sec-websocket-key'];
+      if (!key || req.headers['upgrade']?.toLowerCase() !== 'websocket') {
+        socket.destroy();
+        return;
+      }
+
+      const acceptKey = createHash('sha1')
+        .update(key + WS_GUID)
+        .digest('base64');
+
+      socket.write(
+        'HTTP/1.1 101 Switching Protocols\r\n' +
+        'Upgrade: websocket\r\n' +
+        'Connection: Upgrade\r\n' +
+        `Sec-WebSocket-Accept: ${acceptKey}\r\n` +
+        '\r\n',
+      );
+
+      this._wsClients.add(socket);
+      socket.on('close', () => this._wsClients.delete(socket));
+      socket.on('error', () => this._wsClients.delete(socket));
+    });
+
+    this._httpServer.listen(port);
+  }
+
+  stopBroadcastServer(): void {
+    for (const client of this._wsClients) {
+      try { client.destroy(); } catch { /* ignore */ }
+    }
+    this._wsClients.clear();
+    this._httpServer?.close();
+    this._httpServer = null;
+  }
+
+  get wsClientCount(): number {
+    return this._wsClients.size;
+  }
+
+  // ── WebSocket frame encoding ──────────────────────────────────────────────
+
+  private _encodeWsTextFrame(text: string): Buffer {
+    const payload = Buffer.from(text, 'utf8');
+    const len = payload.length;
+
+    let header: Buffer;
+    if (len < 126) {
+      header = Buffer.alloc(2);
+      header[0] = 0x81;
+      header[1] = len;
+    } else if (len < 65536) {
+      header = Buffer.alloc(4);
+      header[0] = 0x81;
+      header[1] = 126;
+      header.writeUInt16BE(len, 2);
+    } else {
+      header = Buffer.alloc(10);
+      header[0] = 0x81;
+      header[1] = 127;
+      header.writeUInt32BE(0, 2);
+      header.writeUInt32BE(len, 6);
+    }
+
+    return Buffer.concat([header, payload]);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Factory / loader
+// ---------------------------------------------------------------------------
+
+export function loadEnvWebhooks(manager: SubscriptionManager): number {
+  const raw = process.env['WEBHOOK_URLS'];
+  if (!raw) return 0;
+
+  let count = 0;
+  for (const url of raw.split(',').map((u) => u.trim()).filter(Boolean)) {
+    manager.register({}, url);
+    count++;
+  }
+  return count;
+}
+
+/** Singleton manager (shared across the process). */
+let _globalManager: SubscriptionManager | null = null;
+
+export function getWebhookManager(): SubscriptionManager {
+  if (!_globalManager) {
+    _globalManager = new SubscriptionManager();
+    loadEnvWebhooks(_globalManager);
+  }
+  return _globalManager;
+}
+
+/** Reset the singleton (for tests). */
+export function resetWebhookManager(): void {
+  _globalManager?.stopBroadcastServer();
+  _globalManager = null;
+}

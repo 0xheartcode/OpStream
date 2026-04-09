@@ -1,18 +1,23 @@
 /**
  * SQLite database initializer for OpStream using Node.js built-in node:sqlite.
  *
- * Creates only the 9 OpStream tables (indexer/scanner data).
- * Bot-specific tables (simulations, strategy_windows, strategy_events, etc.) live in your-app.
- * WAL mode and foreign keys are enabled on every open.
+ * OpStream is a pure Layer 2 chain scanner — it stores raw events and
+ * chain-level data only. Domain-specific tables (pools, reserves, candles)
+ * belong in Layer 3 (OpKit handler framework).
  *
- * Pool status lifecycle:
- *   UNVERIFIED → FRESH (just created) → VIABLE (reserves > 0) → DORMANT (zero reserves)
- *   → DEAD (removed from rotation) | RUG (rug-pull detected)
+ * Tables:
+ *   tokens             OP20 token metadata (chain-level)
+ *   events             Raw decoded events from all contracts
+ *   scan_checkpoints   Block scanning progress
+ *   token_deployments  OP20 contract creation tracking
+ *   block_hashes       Block hash storage for reorg detection
+ *   runtime_metrics    Performance counters
+ *   error_log          Error tracking
  */
 
 import { DatabaseSync } from 'node:sqlite';
-
-export type PoolStatus = 'UNVERIFIED' | 'FRESH' | 'VIABLE' | 'DORMANT' | 'DEAD' | 'RUG';
+import { mkdirSync, existsSync } from 'node:fs';
+import { dirname } from 'node:path';
 
 const SCHEMA = `
 PRAGMA journal_mode = WAL;
@@ -25,23 +30,6 @@ CREATE TABLE IF NOT EXISTS tokens (
   decimals  INTEGER NOT NULL DEFAULT 8,
   updated_at INTEGER DEFAULT (unixepoch())
 );
-
-CREATE TABLE IF NOT EXISTS pools (
-  address       TEXT NOT NULL PRIMARY KEY,
-  token0        TEXT NOT NULL,
-  token1        TEXT NOT NULL,
-  reserve0      TEXT NOT NULL DEFAULT '0',
-  reserve1      TEXT NOT NULL DEFAULT '0',
-  status        TEXT NOT NULL DEFAULT 'UNVERIFIED',
-  fee_bps       INTEGER NOT NULL DEFAULT 20,
-  created_block INTEGER,
-  last_updated  INTEGER DEFAULT (unixepoch()),
-  dex           TEXT NOT NULL DEFAULT 'nativeswap',
-  FOREIGN KEY (token0) REFERENCES tokens(address),
-  FOREIGN KEY (token1) REFERENCES tokens(address)
-);
-
-CREATE INDEX IF NOT EXISTS idx_pools_status ON pools(status);
 
 CREATE TABLE IF NOT EXISTS scan_checkpoints (
   scan_type   TEXT NOT NULL PRIMARY KEY,
@@ -81,35 +69,10 @@ CREATE TABLE IF NOT EXISTS token_deployments (
 CREATE INDEX IF NOT EXISTS idx_token_deployments_block    ON token_deployments(block_number);
 CREATE INDEX IF NOT EXISTS idx_token_deployments_contract ON token_deployments(contract_address);
 
-CREATE TABLE IF NOT EXISTS reserve_snapshots (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  pool_address  TEXT NOT NULL,
-  block_number  INTEGER NOT NULL,
-  reserve0      TEXT NOT NULL,
-  reserve1      TEXT NOT NULL,
-  implied_price REAL,
-  source        TEXT NOT NULL,
-  created_at    INTEGER NOT NULL DEFAULT (unixepoch()),
-  UNIQUE(pool_address, block_number, source)
+CREATE TABLE IF NOT EXISTS block_hashes (
+  block_number INTEGER PRIMARY KEY,
+  block_hash   TEXT NOT NULL
 );
-
-CREATE INDEX IF NOT EXISTS idx_snapshots_pool_block ON reserve_snapshots(pool_address, block_number);
-CREATE INDEX IF NOT EXISTS idx_snapshots_block ON reserve_snapshots(block_number);
-
-CREATE TABLE IF NOT EXISTS price_candles (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT,
-  pool_address TEXT NOT NULL,
-  interval     TEXT NOT NULL,
-  period_start INTEGER NOT NULL,
-  open         REAL,
-  high         REAL,
-  low          REAL,
-  close        REAL,
-  volume       REAL NOT NULL DEFAULT 0,
-  UNIQUE(pool_address, interval, period_start)
-);
-
-CREATE INDEX IF NOT EXISTS idx_candles_pool_interval ON price_candles(pool_address, interval);
 
 CREATE TABLE IF NOT EXISTS runtime_metrics (
   key        TEXT NOT NULL PRIMARY KEY,
@@ -140,14 +103,6 @@ let _db: DatabaseSync | null = null;
  */
 function runMigrations(db: DatabaseSync): void {
   try {
-    // add dex column if missing
-    const cols = db.prepare('PRAGMA table_info(pools)').all() as Array<{ name: string }>;
-    if (!cols.some(c => c.name === 'dex')) {
-      db.exec(`ALTER TABLE pools ADD COLUMN dex TEXT NOT NULL DEFAULT 'nativeswap'`);
-    }
-    if (!cols.some(c => c.name === 'creator_address')) {
-      db.exec(`ALTER TABLE pools ADD COLUMN creator_address TEXT`);
-    }
     // alt_address for dual address format support (op1sq bech32m + 0x hex)
     const tokenCols = db.prepare('PRAGMA table_info(tokens)').all() as Array<{ name: string }>;
     if (!tokenCols.some(c => c.name === 'alt_address')) {
@@ -164,7 +119,12 @@ function runMigrations(db: DatabaseSync): void {
 
 export function openDb(path: string): DatabaseSync {
   if (_db) return _db;
+  const dir = dirname(path);
+  if (dir && dir !== '.' && !existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
   _db = new DatabaseSync(path);
+  _db.exec('PRAGMA busy_timeout = 5000;');
   _db.exec(SCHEMA);
   runMigrations(_db);
   return _db;

@@ -6,22 +6,23 @@
  *
  * Architecture:
  *   - Polls getBlockNumber() every pollIntervalMs (default 30s, ~2 Bitcoin blocks)
- *   - When a new block is seen, calls scanBlocks() for the range [checkpoint+1, newBlock]
- *   - Checkpoint is updated by scanBlocks() after each block
+ *   - When new blocks arrive, calls scanBlockRange() for [checkpoint+1, newBlock]
+ *   - Checks for chain reorgs by comparing stored block hashes
  *   - Tracks `blocksIndexedLive` and `eventsIndexedLive` in the metrics store
- *
- * Usage:
- *   const handle = startLiveIndexer(db, client);
- *   // later:
- *   handle.stop();
  */
 
 import type { DatabaseSync } from 'node:sqlite';
 import { log } from '../core/logger.js';
 import { metrics } from '../core/metrics.js';
 import type { OpnetRpcClient } from '../rpc/opnetRpc.js';
-import { aggregateCandles } from './candles.js';
-import type { CandleInterval } from './candles.js';
+import {
+  scanBlockRange,
+  getCheckpoint,
+  getBlockHash,
+  deleteBlockDataFrom,
+  saveCheckpoint,
+} from './scanner.js';
+import type { ScanResult, OnEventCallback } from './scanner.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -32,21 +33,20 @@ export type ScanBlocksFn = (
   client: OpnetRpcClient,
   fromBlock: bigint,
   toBlock: bigint,
-  opts: { chunkSize: bigint; minIntervalMs: number; nativeSwapEnabled: boolean },
-) => Promise<unknown>;
+) => Promise<ScanResult>;
 
 export interface LiveIndexerOptions {
   /** How often to poll for new blocks (ms). Default: 30_000 (30s). */
   pollIntervalMs?: number;
   /** Maximum blocks to process per poll cycle. Default: 100. */
   maxBlocksPerCycle?: number;
-  /** Enable NativeSwap pool discovery while scanning. Default: true. */
-  nativeSwapEnabled?: boolean;
   /**
-   * Override the scanBlocks implementation (for testing).
-   * Defaults to the real scanBlocks from bootstrap.ts.
+   * Override the scanBlockRange implementation (for testing).
+   * Defaults to the real scanBlockRange from scanner.ts.
    */
   scanFn?: ScanBlocksFn;
+  /** Called for each event as it's indexed. Used for WebSocket/webhook dispatch. */
+  onEvent?: OnEventCallback;
 }
 
 export interface LiveIndexerHealth {
@@ -63,16 +63,61 @@ export interface LiveIndexerHandle {
 }
 
 // ---------------------------------------------------------------------------
-// Checkpoint helpers
+// Reorg detection
 // ---------------------------------------------------------------------------
 
-const SCAN_TYPE_INDEXER = 'indexer';
+const MAX_REORG_DEPTH = 10;
 
-function getCheckpoint(db: DatabaseSync): bigint {
-  const row = db.prepare(
-    'SELECT last_block FROM scan_checkpoints WHERE scan_type = ?',
-  ).get(SCAN_TYPE_INDEXER) as { last_block: number } | undefined;
-  return row ? BigInt(row.last_block) : 0n;
+/**
+ * Check if the chain has reorged by comparing stored block hashes.
+ * Returns the fork point block number if a reorg is detected, null otherwise.
+ */
+async function checkForReorg(
+  db: DatabaseSync,
+  client: OpnetRpcClient,
+  lastIndexedBlock: number,
+): Promise<number | null> {
+  for (let depth = 0; depth < MAX_REORG_DEPTH; depth++) {
+    const checkBlock = lastIndexedBlock - depth;
+    if (checkBlock <= 0) return null;
+
+    const storedHash = getBlockHash(db, checkBlock);
+    if (!storedHash) return null; // no hash stored, can't detect
+
+    try {
+      const block = await client.getBlock(BigInt(checkBlock));
+      if (!block) return null;
+
+      const onChainHash = String((block as any).hash ?? (block as any).id ?? '');
+      if (!onChainHash) return null;
+
+      if (storedHash !== onChainHash) {
+        // This block was reorged — continue checking deeper
+        continue;
+      }
+
+      // Hashes match at this depth
+      if (depth > 0) {
+        // We found the fork point: blocks from (checkBlock + 1) onward are invalid
+        return checkBlock + 1;
+      }
+
+      // depth === 0 and hashes match — no reorg
+      return null;
+    } catch (err) {
+      log('WARN', 'liveIndexer', 'Reorg check failed for block', {
+        blockNumber: checkBlock,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+  }
+
+  // Reorg deeper than MAX_REORG_DEPTH — return the deepest point we checked
+  log('WARN', 'liveIndexer', `Reorg deeper than ${MAX_REORG_DEPTH} blocks detected`, {
+    lastIndexedBlock,
+  });
+  return lastIndexedBlock - MAX_REORG_DEPTH + 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -92,8 +137,8 @@ export function startLiveIndexer(
 ): LiveIndexerHandle {
   const pollIntervalMs    = opts?.pollIntervalMs    ?? 30_000;
   const maxBlocksPerCycle = opts?.maxBlocksPerCycle ?? 100;
-  const nativeSwapEnabled = opts?.nativeSwapEnabled ?? true;
   const scanFn            = opts?.scanFn;
+  const onEvent           = opts?.onEvent;
 
   let running = true;
   let lastPollAt = 0;
@@ -110,6 +155,22 @@ export function startLiveIndexer(
       const checkpoint = getCheckpoint(db);
       const currentBlock = await client.getBlockNumber();
 
+      // Check for reorgs before scanning new blocks
+      if (checkpoint > 0n) {
+        const forkPoint = await checkForReorg(db, client, Number(checkpoint));
+        if (forkPoint !== null) {
+          log('WARN', 'liveIndexer', 'Chain reorg detected — rolling back', {
+            forkPoint,
+            lastIndexedBlock: Number(checkpoint),
+          });
+          deleteBlockDataFrom(db, forkPoint);
+          saveCheckpoint(db, BigInt(forkPoint - 1));
+          lastIndexedBlock = forkPoint - 1;
+          // Re-scan from fork point on next poll
+          return;
+        }
+      }
+
       const fromBlock = checkpoint + 1n;
       let toBlock = currentBlock;
 
@@ -118,53 +179,20 @@ export function startLiveIndexer(
       }
 
       if (fromBlock > currentBlock) {
-        log('DEBUG', 'liveIndexer', 'indexer: up to date', {
-          checkpoint: Number(checkpoint),
-          currentBlock: Number(currentBlock),
-        });
+        log('INFO', 'live', `Synced  block=${Number(currentBlock)}  waiting for new blocks...`);
       } else {
-        const eventsBefore = (db.prepare('SELECT COUNT(*) as c FROM events').get() as { c: number }).c;
+        const blocksAhead = Number(toBlock - fromBlock + 1n);
+        log('INFO', 'live', `New blocks  ${Number(fromBlock)}..${Number(toBlock)} (+${blocksAhead})`);
 
-        // Use injected scanFn (for tests) or lazy-load the real scanBlocks
-        const scan = scanFn ?? (await import('./bootstrap.js')).scanBlocks;
-        await scan(db, client, fromBlock, toBlock, {
-          chunkSize: BigInt(maxBlocksPerCycle),
-          minIntervalMs: 0,
-          nativeSwapEnabled,
-        });
+        const result = scanFn
+          ? await scanFn(db, client, fromBlock, toBlock)
+          : await scanBlockRange(db, client, fromBlock, toBlock, { onEvent });
 
-        const eventsAfter = (db.prepare('SELECT COUNT(*) as c FROM events').get() as { c: number }).c;
-        const blocksProcessed = Number(toBlock - fromBlock + 1n);
-        const eventsNew = eventsAfter - eventsBefore;
-
-        metrics.increment('blocksIndexedLive', blocksProcessed);
-        metrics.increment('eventsIndexedLive', eventsNew);
+        metrics.increment('blocksIndexedLive', blocksAhead);
+        metrics.increment('eventsIndexedLive', result.eventsStored);
         lastIndexedBlock = Number(toBlock);
 
-        try {
-          const batchFrom = Number(fromBlock);
-          const batchTo = Number(toBlock);
-          const poolRows = db.prepare(
-            `SELECT DISTINCT pool_address FROM reserve_snapshots WHERE block_number >= ? AND block_number <= ?`,
-          ).all(batchFrom, batchTo) as unknown as { pool_address: string }[];
-          const INTERVALS: CandleInterval[] = ['10m', '1h', '1d'];
-          for (const { pool_address } of poolRows) {
-            for (const interval of INTERVALS) {
-              aggregateCandles(db, pool_address, interval, batchFrom, batchTo);
-            }
-          }
-        } catch (err) {
-          log('WARN', 'liveIndexer', 'Candle aggregation failed', {
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-
-        log('INFO', 'liveIndexer', 'Live indexer: processed blocks', {
-          fromBlock: Number(fromBlock),
-          toBlock: Number(toBlock),
-          blocksProcessed,
-          newEvents: eventsNew,
-        });
+        log('INFO', 'live', `Indexed  block=${Number(toBlock)}  events=${result.eventsStored}  deploys=${result.deploymentsFound}`);
       }
     } catch (err) {
       log('WARN', 'liveIndexer', 'Live indexer poll failed', {

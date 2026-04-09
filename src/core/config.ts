@@ -1,8 +1,8 @@
 /**
  * OpStream configuration loader — reads environment variables with safe defaults.
  *
+ * OpStream is a pure Layer 2 scanner — no DEX-specific config here.
  * Call loadConfig() once at startup after dotenv.config().
- * Trimmed to OpStream-only fields (no trading thresholds, bot flags, or staking params).
  */
 
 export interface OpStreamConfig {
@@ -11,12 +11,6 @@ export interface OpStreamConfig {
   bitcoinRpcUrl: string;
   bitcoinRpcUser: string;
   bitcoinRpcPass: string;
-
-  // NativeSwap factory address
-  nativeSwapFactory: string;
-
-  // NativeSwap scanning enabled
-  nativeSwapEnabled: boolean;
 
   // Logging
   logLevel: string;
@@ -32,11 +26,9 @@ export interface OpStreamConfig {
 
   // Metrics emission interval (s)
   metricsIntervalSeconds: number;
-}
 
-function parseBool(val: string | undefined, def: boolean): boolean {
-  if (val === undefined) return def;
-  return val.toLowerCase() !== 'false' && val !== '0';
+  // WebSocket broadcast server port (0 = disabled)
+  wsPort: number;
 }
 
 function parseBigInt(val: string | undefined, def: bigint): bigint {
@@ -55,15 +47,14 @@ export function loadConfig(): OpStreamConfig {
     bitcoinRpcUrl:     process.env['BITCOIN_RPC_URL']     ?? '',
     bitcoinRpcUser:    process.env['BITCOIN_RPC_USER']    ?? '',
     bitcoinRpcPass:    process.env['BITCOIN_RPC_PASS']    ?? '',
-    nativeSwapFactory: process.env['NATIVESWAP_FACTORY']  ?? '',
-    nativeSwapEnabled: parseBool(process.env['NATIVESWAP_ENABLED'], true),
     logLevel:          process.env['LOG_LEVEL']           ?? 'INFO',
     logFormat:         process.env['LOG_FORMAT']          ?? 'human',
-    dbPath:            process.env['DB_PATH']             ?? 'opstream.db',
+    dbPath:            process.env['DB_PATH']             ?? 'data/opstream.db',
     bootstrapRps:        parseInt10(process.env['BOOTSTRAP_RPS'], 10),
     bootstrapChunkSize:  parseInt10(process.env['BOOTSTRAP_CHUNK_SIZE'], 500),
     bootstrapFromBlock:  parseBigInt(process.env['BOOTSTRAP_FROM_BLOCK'], 941400n),
     metricsIntervalSeconds: parseInt10(process.env['METRICS_INTERVAL_SECONDS'], 60),
+    wsPort: parseInt10(process.env['WS_PORT'], 0),
   };
 }
 
@@ -85,7 +76,6 @@ const PLACEHOLDER_PATTERNS = [
 export function validateConfig(config: OpStreamConfig): void {
   const addressFields: Array<keyof OpStreamConfig> = [
     'opnetRpcUrl',
-    'nativeSwapFactory',
   ];
 
   for (const field of addressFields) {

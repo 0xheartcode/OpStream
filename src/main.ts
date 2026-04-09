@@ -1,34 +1,36 @@
 #!/usr/bin/env node
 /**
- * OpStream CLI — chain scanner & indexer for OPNET.
+ * OpStream CLI — pure Layer 2 chain scanner for OPNET.
  *
  * Commands:
- *   bootstrap              Full scan from BOOTSTRAP_FROM_BLOCK
- *   rediscover-pools       Re-run pool discovery on stored events (no block re-scan)
- *   db-migration-repair    Normalize op1sq→0x addresses + refresh token metadata
+ *   start                  Bootstrap + live (catch up, then follow chain tip)
+ *   bootstrap              Full scan from BOOTSTRAP_FROM_BLOCK (exits when done)
+ *   live                   Follow chain tip only (assumes already caught up)
+ *   db-migration-repair    Normalize op1sq->0x addresses + refresh token metadata
  */
 
 import 'dotenv/config';
 
 const USAGE = `
-OpStream — Chain scanner & indexer for OPNET
+OpStream — Pure Layer 2 chain scanner for OPNET
 
 Usage: npx tsx src/main.ts <command>
 
 Commands:
-  bootstrap              Full scan from BOOTSTRAP_FROM_BLOCK (checkpoint-resumable)
-  rediscover-pools       Re-run pool discovery on stored events (no block re-scan)
-  db-migration-repair    Normalize op1sq→0x addresses + refresh token decimals/metadata
+  start                  Bootstrap + live — catch up then follow chain tip
+  bootstrap              Full scan from BOOTSTRAP_FROM_BLOCK (exits when done)
+  live                   Follow chain tip only (assumes already caught up)
+  db-migration-repair    Normalize op1sq->0x addresses + refresh token metadata
 
 Environment:
   OPNET_RPC_URL          OPNET JSON-RPC endpoint (default: https://mainnet.opnet.org)
-  DB_PATH                SQLite database file (default: opstream.db)
+  DB_PATH                SQLite database file (default: data/opstream.db)
   BOOTSTRAP_FROM_BLOCK   Starting block (default: 941400)
   BOOTSTRAP_RPS          Rate limit: requests per second (default: 10)
   BOOTSTRAP_CHUNK_SIZE   Blocks per chunk (default: 500)
-  NATIVESWAP_ENABLED     Enable NativeSwap scanning (default: true)
+  WS_PORT                WebSocket broadcast port, 0=disabled (default: 0)
+  WEBHOOK_URLS           Comma-separated HTTP callback URLs (default: none)
   LOG_LEVEL              DEBUG | INFO | WARN | ERROR (default: INFO)
-  LOG_FORMAT             human | json (default: human)
 `.trim();
 
 async function main(): Promise<void> {
@@ -46,20 +48,57 @@ async function main(): Promise<void> {
       break;
     }
 
-    case 'rediscover-pools': {
+    case 'start': {
+      // Bootstrap to catch up, then switch to live indexing
+      const { runBootstrap } = await import('./indexer/bootstrap.js');
       const { loadConfig } = await import('./core/config.js');
       const { openDb } = await import('./core/db.js');
       const { OpnetRpcClient } = await import('./rpc/opnetRpc.js');
-      const { rediscoverPools } = await import('./indexer/bootstrap.js');
+      const { runLiveIndexer } = await import('./indexer/liveIndexer.js');
+      const { getWebhookManager } = await import('./indexer/webhooks.js');
+      const { log } = await import('./core/logger.js');
+
+      await runBootstrap();
 
       const config = loadConfig();
       const db = openDb(config.dbPath);
       const client = new OpnetRpcClient(config.opnetRpcUrl);
+      const webhooks = getWebhookManager();
 
-      const result = await rediscoverPools(db, client);
-      process.stdout.write(
-        `Rediscovery complete: ${result.nativeSwapPoolsFound} NativeSwap, ${result.motoswapPoolsFound} Motoswap pools found\n`,
-      );
+      if (config.wsPort > 0) {
+        webhooks.startBroadcastServer(config.wsPort);
+        log('INFO', 'main', `WebSocket broadcast server on ws://localhost:${config.wsPort}`);
+      }
+
+      log('INFO', 'main', 'Bootstrap complete — switching to live indexer');
+      await runLiveIndexer(db, client, {
+        onEvent: (event) => webhooks.dispatch(event),
+      });
+      break;
+    }
+
+    case 'live': {
+      const { loadConfig } = await import('./core/config.js');
+      const { openDb } = await import('./core/db.js');
+      const { OpnetRpcClient } = await import('./rpc/opnetRpc.js');
+      const { runLiveIndexer } = await import('./indexer/liveIndexer.js');
+      const { getWebhookManager } = await import('./indexer/webhooks.js');
+      const { log } = await import('./core/logger.js');
+
+      const config = loadConfig();
+      const db = openDb(config.dbPath);
+      const client = new OpnetRpcClient(config.opnetRpcUrl);
+      const webhooks = getWebhookManager();
+
+      if (config.wsPort > 0) {
+        webhooks.startBroadcastServer(config.wsPort);
+        log('INFO', 'main', `WebSocket broadcast server on ws://localhost:${config.wsPort}`);
+      }
+
+      log('INFO', 'main', 'Starting live indexer...', { dbPath: config.dbPath });
+      await runLiveIndexer(db, client, {
+        onEvent: (event) => webhooks.dispatch(event),
+      });
       break;
     }
 

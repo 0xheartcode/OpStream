@@ -11,7 +11,9 @@ import type { BitcoinInterfaceAbi } from 'opnet';
 import { networks } from '@btc-vision/bitcoin';
 import type { Network } from '@btc-vision/bitcoin';
 import { log } from '../core/logger.js';
-import { DEFAULT_NATIVESWAP_FACTORY } from '@opnet-devs/opkit';
+// TODO: import from @opnet-devs/opkit once rebuild is complete
+// import { DEFAULT_NATIVESWAP_FACTORY } from '@opnet-devs/opkit';
+const DEFAULT_NATIVESWAP_FACTORY = '0xe63a5daa13af5a41351772940ea3c8abcf3f5e9ff741cfc9d1d1f8463e8bea1a';
 
 const NETWORK: Network = networks.bitcoin;
 

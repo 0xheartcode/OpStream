@@ -1,0 +1,31 @@
+{
+  "name": "@opnet-devs/opstream",
+  "version": "0.1.0",
+  "description": "Chain scanner & indexer for OPNET — RPC clients, bootstrap scanner, event store, candles, snapshots, pool readers, live indexer",
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*"
+  },
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@btc-vision/bitcoin-rpc": "^1.1.2",
+    "@btc-vision/transaction": "^1.8.6",
+    "@opnet-devs/opkit": "file:../OpKit",
+    "dotenv": "^16.4.5",
+    "opnet": "^1.8.13"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^1.6.0"
+  }
+}

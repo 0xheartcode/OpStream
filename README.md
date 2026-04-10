@@ -1,5 +1,8 @@
 # OpStream
 
+[![CI](https://github.com/opnet-devs/opstream/actions/workflows/ci.yml/badge.svg)](https://github.com/opnet-devs/opstream/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+
 Pure Layer 2 chain scanner for OPNET.
 
 ## The Problem
@@ -388,6 +391,15 @@ just check         # typecheck + lint + test in one shot
 | [docs/webhooks.md](./docs/webhooks.md) | HTTP delivery, programmatic subscriptions, pattern matching, retry |
 | [docs/querying.md](./docs/querying.md) | SQL patterns, full schema reference, compound query examples |
 | [docs/opkit-integration.md](./docs/opkit-integration.md) | Tier 1/2/3 event sources, ABI decoder injection, DB layout |
+
+## Contributing
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for setup instructions, coding standards, and PR expectations.
+All PRs must pass CI (typecheck + lint + tests) before merge.
+
+## License
+
+[MIT](./LICENSE)
 
 ## Tech Stack
 

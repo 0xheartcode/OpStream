@@ -89,6 +89,15 @@ typecheck:
     npx tsc --noEmit
     @echo "${GREEN}✔ No type errors${RESET}"
 
+# Lint src and tests
+lint:
+    @echo "${BLUE}▶ Linting...${RESET}"
+    npx eslint src tests
+    @echo "${GREEN}✔ No lint errors${RESET}"
+
+# Type check + lint + test (full CI gate)
+check: typecheck lint test
+
 # ══════════════════════════════════════════════════════════════════════════════
 # §4  Database
 # ══════════════════════════════════════════════════════════════════════════════

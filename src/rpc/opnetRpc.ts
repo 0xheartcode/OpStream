@@ -10,11 +10,11 @@
 
 import { networks } from '@btc-vision/bitcoin';
 import {
-  Block,
-  InteractionTransaction,
+  type Block,
+  type InteractionTransaction,
   JSONRpcProvider,
   OPNetTransactionTypes,
-  TransactionBase,
+  type TransactionBase,
 } from 'opnet';
 import type { CallResult } from 'opnet';
 import type { ICallRequestError } from 'opnet';

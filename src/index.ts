@@ -24,14 +24,14 @@ export {
   scanBlockRange,
   getCheckpoint,
   saveCheckpoint,
-  saveBlockHash,
+  saveBlock,
   getBlockHash,
   deleteBlockDataFrom,
 } from './indexer/scanner.js';
 export type { ScanResult, ScanOptions, OnEventCallback } from './indexer/scanner.js';
 
 // Bootstrap (CLI orchestration)
-export { runBootstrap, runBootstrapCore, runCatchup, runDbMigrationRepair, normalizeTokenAddresses, refreshTokenMetadata, queryTokenDeployments } from './indexer/bootstrap.js';
+export { runBootstrap, runBootstrapCore, runCatchup, queryTokenDeployments } from './indexer/bootstrap.js';
 export type { BootstrapOptions, BootstrapResult, TokenDeploymentRow } from './indexer/bootstrap.js';
 
 // Event store

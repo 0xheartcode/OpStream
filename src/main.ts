@@ -3,10 +3,9 @@
  * OpStream CLI — pure Layer 2 chain scanner for OPNET.
  *
  * Commands:
- *   start                  Bootstrap + live (catch up, then follow chain tip)
- *   bootstrap              Full scan from BOOTSTRAP_FROM_BLOCK (exits when done)
- *   live                   Follow chain tip only (assumes already caught up)
- *   db-migration-repair    Normalize op1sq->0x addresses + refresh token metadata
+ *   start      Bootstrap + live (catch up, then follow chain tip)
+ *   bootstrap  Full scan from BOOTSTRAP_FROM_BLOCK (exits when done)
+ *   live       Follow chain tip only (assumes already caught up)
  */
 
 import 'dotenv/config';
@@ -17,10 +16,9 @@ OpStream — Pure Layer 2 chain scanner for OPNET
 Usage: npx tsx src/main.ts <command>
 
 Commands:
-  start                  Bootstrap + live — catch up then follow chain tip
-  bootstrap              Full scan from BOOTSTRAP_FROM_BLOCK (exits when done)
-  live                   Follow chain tip only (assumes already caught up)
-  db-migration-repair    Normalize op1sq->0x addresses + refresh token metadata
+  start      Bootstrap + live — catch up then follow chain tip
+  bootstrap  Full scan from BOOTSTRAP_FROM_BLOCK (exits when done)
+  live       Follow chain tip only (assumes already caught up)
 
 Environment:
   OPNET_RPC_URL          OPNET JSON-RPC endpoint (default: https://mainnet.opnet.org)
@@ -99,20 +97,6 @@ async function main(): Promise<void> {
       await runLiveIndexer(db, client, {
         onEvent: (event) => webhooks.dispatch(event),
       });
-      break;
-    }
-
-    case 'db-migration-repair': {
-      const { loadConfig } = await import('./core/config.js');
-      const { openDb } = await import('./core/db.js');
-      const { OpnetRpcClient } = await import('./rpc/opnetRpc.js');
-      const { runDbMigrationRepair } = await import('./indexer/bootstrap.js');
-
-      const config = loadConfig();
-      const db = openDb(config.dbPath);
-      const client = new OpnetRpcClient(config.opnetRpcUrl);
-
-      await runDbMigrationRepair(db, client);
       break;
     }
 

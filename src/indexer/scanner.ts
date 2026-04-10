@@ -20,6 +20,37 @@ import { decodeEvent } from '@opnet-devs/opkit';
 import type { OpnetRpcClient } from '../rpc/opnetRpc.js';
 
 // ---------------------------------------------------------------------------
+// Internal types
+// ---------------------------------------------------------------------------
+
+interface TxRow {
+  txHash: string;
+  blockNumber: number;
+  txIndex: number;
+  txType: string;
+  fromAddress: string | null;
+  contractAddress: string | null;
+  gasUsed: string | null;
+  specialGasUsed: string | null;
+  burnedBitcoin: string | null;
+  priorityFee: string | null;
+  maxGasSat: string | null;
+  failed: number;
+  revertReason: string | null;
+  calldata: Buffer | null;
+  calldataLength: number | null;
+  senderPubKeyHash: string | null;
+}
+
+interface OutputRow {
+  txHash: string;
+  outputIndex: number;
+  valueSat: bigint | null;
+  scriptType: string | null;
+  address: string | null;
+}
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -43,6 +74,12 @@ export interface ScanOptions {
   minIntervalMs?: number;
   /** Called for each event after it's stored. */
   onEvent?: OnEventCallback;
+  /**
+   * Called every ~10 blocks with (doneInChunk, chunkProgressLine).
+   * When provided, scanner skips its own log() for progress — the caller
+   * owns the display (e.g. two-line TTY rewrite in bootstrap).
+   */
+  onProgress?: (doneInChunk: number, chunkLine: string) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -54,7 +91,7 @@ function delay(ms: number): Promise<void> {
 }
 
 /** Render a text progress bar: [========>           ] */
-function progressBar(done: number, total: number, width: number): string {
+export function progressBar(done: number, total: number, width: number): string {
   if (total <= 0) return `[${''.padEnd(width, '-')}]`;
   const filled = Math.round((done / total) * width);
   const empty = width - filled;
@@ -62,7 +99,7 @@ function progressBar(done: number, total: number, width: number): string {
 }
 
 /** Format seconds into human-readable elapsed time. */
-function humanElapsed(seconds: number): string {
+export function humanElapsed(seconds: number): string {
   if (seconds < 60) return `${seconds.toFixed(1)}s`;
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60);
@@ -72,24 +109,13 @@ function humanElapsed(seconds: number): string {
 }
 
 // ---------------------------------------------------------------------------
-// Token deployment helpers
+// Deployment helpers
 // ---------------------------------------------------------------------------
-
-const OP20_EVENT_NAMES = new Set(['Transfer', 'Approval']);
 
 function hashBytecode(bytecode: Uint8Array | string | undefined): string {
   if (!bytecode) return '';
   const buf = bytecode instanceof Uint8Array ? Buffer.from(bytecode) : Buffer.from(bytecode, 'hex');
   return createHash('sha256').update(buf).digest('hex').slice(0, 16);
-}
-
-function isOp20(contractAddress: string, blockEvents: Map<string, Set<string>>): boolean {
-  const names = blockEvents.get(contractAddress.toLowerCase());
-  if (!names) return false;
-  for (const n of OP20_EVENT_NAMES) {
-    if (names.has(n)) return true;
-  }
-  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -116,26 +142,39 @@ export function saveCheckpoint(db: DatabaseSync, block: bigint): void {
 }
 
 // ---------------------------------------------------------------------------
-// Block hash helpers (reorg detection)
+// Block helpers (reorg detection + metadata)
 // ---------------------------------------------------------------------------
 
-export function saveBlockHash(db: DatabaseSync, blockNumber: number, blockHash: string): void {
+export function saveBlock(
+  db: DatabaseSync,
+  blockNumber: number,
+  blockHash: string,
+  timestamp: number | null,
+  txCount: number,
+): void {
   db.prepare(`
-    INSERT OR REPLACE INTO block_hashes (block_number, block_hash)
-    VALUES (?, ?)
-  `).run(blockNumber, blockHash);
+    INSERT OR REPLACE INTO blocks (block_number, block_hash, timestamp, tx_count)
+    VALUES (?, ?, ?, ?)
+  `).run(blockNumber, blockHash, timestamp, txCount);
 }
 
 export function getBlockHash(db: DatabaseSync, blockNumber: number): string | null {
   const row = db.prepare(
-    'SELECT block_hash FROM block_hashes WHERE block_number = ?',
+    'SELECT block_hash FROM blocks WHERE block_number = ?',
   ).get(blockNumber) as { block_hash: string } | undefined;
   return row?.block_hash ?? null;
 }
 
 export function deleteBlockDataFrom(db: DatabaseSync, fromBlock: number): void {
+  // Delete tx_outputs via tx_hash FK (no block_number on tx_outputs)
+  db.prepare(`
+    DELETE FROM tx_outputs WHERE tx_hash IN (
+      SELECT tx_hash FROM transactions WHERE block_number >= ?
+    )
+  `).run(fromBlock);
   db.prepare('DELETE FROM events WHERE block_number >= ?').run(fromBlock);
-  db.prepare('DELETE FROM block_hashes WHERE block_number >= ?').run(fromBlock);
+  db.prepare('DELETE FROM transactions WHERE block_number >= ?').run(fromBlock);
+  db.prepare('DELETE FROM blocks WHERE block_number >= ?').run(fromBlock);
   db.prepare('DELETE FROM token_deployments WHERE block_number >= ?').run(fromBlock);
 }
 
@@ -169,17 +208,28 @@ export async function scanBlockRange(
 
   const insertEventStmt = db.prepare(`
     INSERT OR IGNORE INTO events
-      (block_number, tx_hash, contract_address, event_name, event_raw, decoded_json, data_length)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+      (block_number, tx_hash, contract_address, event_name, log_index, event_raw, decoded_json, data_length)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const insertTxStmt = db.prepare(`
+    INSERT OR IGNORE INTO transactions
+      (tx_hash, block_number, tx_index, tx_type, from_address, contract_address,
+       gas_used, special_gas_used, burned_bitcoin, priority_fee, max_gas_sat,
+       failed, revert_reason, calldata, calldata_length, sender_pub_key_hash)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const insertOutputStmt = db.prepare(`
+    INSERT OR IGNORE INTO tx_outputs (tx_hash, output_index, value_sat, script_type, address)
+    VALUES (?, ?, ?, ?, ?)
   `);
   const insertDeployStmt = db.prepare(`
     INSERT OR IGNORE INTO token_deployments
-      (block_number, tx_hash, contract_address, deployer, bytecode_hash, is_op20)
-    VALUES (?, ?, ?, ?, ?, ?)
+      (block_number, tx_hash, contract_address, deployer, bytecode_hash)
+    VALUES (?, ?, ?, ?, ?)
   `);
-  const insertHashStmt = db.prepare(`
-    INSERT OR REPLACE INTO block_hashes (block_number, block_hash)
-    VALUES (?, ?)
+  const insertBlockStmt = db.prepare(`
+    INSERT OR REPLACE INTO blocks (block_number, block_hash, timestamp, tx_count)
+    VALUES (?, ?, ?, ?)
   `);
 
   for (let bn = fromBlock; bn <= toBlock; bn++) {
@@ -204,26 +254,85 @@ export async function scanBlockRange(
     if (!block) continue;
 
     const blockNumber = Number(block.height);
-    const events: EventInput[] = [];
-    const deployments: Array<{ blockNumber: number; txHash: string; contractAddr: string; deployer: string; bytecodeHash: string; op20: boolean }> = [];
-    const blockEventNames = new Map<string, Set<string>>();
+    const blockTimestamp: number | null = (block as any).time ?? (block as any).timestamp ?? null;
+    const events: (EventInput & { logIndex: number })[] = [];
+    const txRows: TxRow[] = [];
+    const deployments: Array<{ blockNumber: number; txHash: string; contractAddr: string; deployer: string; bytecodeHash: string }> = [];
 
-    for (const tx of block.transactions as TransactionBase<OPNetTransactionTypes>[]) {
+    const blockTxs = block.transactions as TransactionBase<OPNetTransactionTypes>[];
+    const outputRows: OutputRow[] = [];
+
+    for (let txIndex = 0; txIndex < blockTxs.length; txIndex++) {
+      const tx = blockTxs[txIndex]!;
+
+      const fromAddress = String((tx as any).from ?? '') || null;
+      const contractAddr = String((tx as any).contractAddress ?? '') || null;
+      const txType =
+        tx.OPNetType === OPNetTransactionTypes.Interaction ? 'interaction' :
+        tx.OPNetType === OPNetTransactionTypes.Deployment   ? 'deployment'  :
+        'generic';
+
+      // Interaction-specific fields
+      let calldata: Buffer | null = null;
+      let calldataLength: number | null = null;
+      let senderPubKeyHash: string | null = null;
+
       if (tx.OPNetType === OPNetTransactionTypes.Interaction) {
         const itx = tx as InteractionTransaction;
+        if (itx.calldata && itx.calldata.length > 0) {
+          calldata = Buffer.from(itx.calldata);
+          calldataLength = calldata.length;
+        }
+        if (itx.senderPubKeyHash && itx.senderPubKeyHash.length > 0) {
+          senderPubKeyHash = Buffer.from(itx.senderPubKeyHash).toString('hex');
+        }
+      }
 
-        for (const [contractAddr, evts] of Object.entries(tx.events)) {
-          const lc = contractAddr.toLowerCase();
-          if (!blockEventNames.has(lc)) blockEventNames.set(lc, new Set());
+      txRows.push({
+        txHash:          tx.id,
+        blockNumber,
+        txIndex,
+        txType,
+        fromAddress,
+        contractAddress: contractAddr,
+        gasUsed:         tx.gasUsed        != null ? String(tx.gasUsed)        : null,
+        specialGasUsed:  tx.specialGasUsed != null ? String(tx.specialGasUsed) : null,
+        burnedBitcoin:   tx.burnedBitcoin  != null ? String(tx.burnedBitcoin)  : null,
+        priorityFee:     tx.priorityFee    != null ? String(tx.priorityFee)    : null,
+        maxGasSat:       tx.maxGasSat      != null ? String(tx.maxGasSat)      : null,
+        failed:          (tx as any).failed ? 1 : 0,
+        revertReason:    (tx as any).revert ?? null,
+        calldata,
+        calldataLength,
+        senderPubKeyHash,
+      });
+
+      // Bitcoin UTXO outputs — every tx type
+      for (const output of tx.outputs) {
+        const spk = output.scriptPubKey as { type?: string; address?: string; addresses?: string[] };
+        outputRows.push({
+          txHash:      tx.id,
+          outputIndex: output.index,
+          valueSat:    output.value ?? null,
+          scriptType:  spk.type ?? null,
+          address:     spk.address ?? spk.addresses?.[0] ?? null,
+        });
+      }
+
+      if (tx.OPNetType === OPNetTransactionTypes.Interaction) {
+        const itx = tx as InteractionTransaction;
+        let logIndex = 0;
+
+        for (const [evContractAddr, evts] of Object.entries(tx.events)) {
           for (const event of evts) {
-            blockEventNames.get(lc)!.add(event.type);
             const rawData = Buffer.from(event.data);
             const decoded = decodeEvent(event.type, rawData);
             events.push({
               blockNumber,
               txHash: itx.id,
-              contractAddress: contractAddr,
+              contractAddress: evContractAddr,
               eventName: event.type,
+              logIndex: logIndex++,
               rawData,
               decodedJson: decoded ? JSON.stringify(decoded) : null,
             });
@@ -231,34 +340,41 @@ export async function scanBlockRange(
         }
       } else if (tx.OPNetType === OPNetTransactionTypes.Deployment) {
         const dtx = tx as DeploymentTransaction;
-        const contractAddr = dtx.contractAddress ?? '';
-        if (contractAddr) {
+        const deployedAddr = dtx.contractAddress ?? '';
+        if (deployedAddr) {
           const deployer = String(dtx.deployerAddress ?? '');
           const bytecodeHash = hashBytecode(dtx.bytecode);
-          const op20 = isOp20(contractAddr, blockEventNames);
-          deployments.push({ blockNumber, txHash: dtx.id, contractAddr, deployer, bytecodeHash, op20 });
+          deployments.push({ blockNumber, txHash: dtx.id, contractAddr: deployedAddr, deployer, bytecodeHash });
         }
       }
     }
 
-    // Single transaction per block: events + deployments + block hash
+    // Single transaction per block: txs + outputs + events + deployments + block metadata
     db.exec('BEGIN');
     try {
+      for (const t of txRows) {
+        insertTxStmt.run(
+          t.txHash, t.blockNumber, t.txIndex, t.txType, t.fromAddress, t.contractAddress,
+          t.gasUsed, t.specialGasUsed, t.burnedBitcoin, t.priorityFee, t.maxGasSat,
+          t.failed, t.revertReason, t.calldata, t.calldataLength, t.senderPubKeyHash,
+        );
+      }
+      for (const o of outputRows) {
+        insertOutputStmt.run(o.txHash, o.outputIndex, o.valueSat !== null ? Number(o.valueSat) : null, o.scriptType, o.address);
+      }
       for (const e of events) {
         insertEventStmt.run(
-          e.blockNumber, e.txHash, e.contractAddress, e.eventName,
+          e.blockNumber, e.txHash, e.contractAddress, e.eventName, e.logIndex,
           e.rawData, e.decodedJson ?? null, e.rawData.length,
         );
       }
       for (const d of deployments) {
         insertDeployStmt.run(
-          d.blockNumber, d.txHash, d.contractAddr, d.deployer, d.bytecodeHash, d.op20 ? 1 : 0,
+          d.blockNumber, d.txHash, d.contractAddr, d.deployer, d.bytecodeHash,
         );
       }
       const blockHash = String(block.hash ?? '');
-      if (blockHash) {
-        insertHashStmt.run(blockNumber, blockHash);
-      }
+      insertBlockStmt.run(blockNumber, blockHash || '', blockTimestamp, blockTxs.length);
       db.exec('COMMIT');
     } catch (err) {
       db.exec('ROLLBACK');
@@ -288,20 +404,23 @@ export async function scanBlockRange(
 
     // Progress every 10 blocks
     if (totalBlocks % 10 === 0) {
-      const totalRange = Number(toBlock - fromBlock + 1n);
+      const chunkRange = Number(toBlock - fromBlock + 1n);
       const done = Number(bn - fromBlock + 1n);
-      const pct = ((done / totalRange) * 100).toFixed(1);
+      const pct = ((done / chunkRange) * 100).toFixed(1);
       const elapsedMs = Date.now() - startTime;
       const bps = (totalBlocks / (elapsedMs / 1000)).toFixed(1);
-      const remaining = totalRange - done;
+      const remaining = chunkRange - done;
       const etaSec = totalBlocks > 0 ? (remaining / (totalBlocks / (elapsedMs / 1000))) : 0;
+      const bar = progressBar(done, chunkRange, 20);
+      const chunkLine =
+        ` Chunk   ${bar} ${pct.padStart(5)}%  block ${blockNumber}/${Number(toBlock)}  ` +
+        `${bps} blk/s  ETA ${humanElapsed(etaSec)}  events: ${totalEvents}`;
 
-      const bar = progressBar(done, totalRange, 20);
-      log('INFO', 'scanner',
-        `${bar} ${pct}%  block ${blockNumber}/${Number(toBlock)}  ` +
-        `${bps} blk/s  ETA ${humanElapsed(etaSec)}  ` +
-        `events: ${totalEvents}  deploys: ${totalDeployments}`,
-      );
+      if (opts?.onProgress) {
+        opts.onProgress(done, chunkLine);
+      } else {
+        log('INFO', 'scanner', chunkLine.trim());
+      }
     }
   }
 

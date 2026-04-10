@@ -1,12 +1,9 @@
 /**
  * OpStream bootstrap — CLI orchestrator for the block scanner.
  *
- * This module is a thin wrapper around scanner.ts that loads config,
- * opens the DB, and calls scanBlockRange in chunks.
- *
- * All DEX-specific pool discovery logic has been moved out of OpStream.
- * OpStream is a pure Layer 2 scanner — it stores raw events and
- * chain-level data only.
+ * Thin wrapper around scanner.ts: loads config, opens DB, calls
+ * scanBlockRange in chunks. No domain logic, no token metadata, no
+ * OP20 labeling — that belongs in OpKit.
  */
 
 import { DatabaseSync } from 'node:sqlite';
@@ -14,11 +11,7 @@ import { log } from '../core/logger.js';
 import { loadConfig } from '../core/config.js';
 import { openDb } from '../core/db.js';
 import { OpnetRpcClient } from '../rpc/opnetRpc.js';
-import { scanBlockRange, getCheckpoint } from './scanner.js';
-
-// TODO: import from @opnet-devs/opkit once rebuild is complete
-// import { DEFAULT_MOTO_TOKEN_ADDRESS } from '@opnet-devs/opkit';
-const DEFAULT_MOTO_TOKEN_ADDRESS = '0x97e9c02879fcfa8f9dd8134e65e4e10df18b0ef7e4a8148dbc2b9e9bb813ea72';
+import { scanBlockRange, getCheckpoint, progressBar, humanElapsed } from './scanner.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -47,59 +40,72 @@ export interface TokenDeploymentRow {
   contract_address: string;
   deployer: string;
   bytecode_hash: string;
-  is_op20: number;
   created_at: number;
 }
 
 export function queryTokenDeployments(
   db: DatabaseSync,
   sinceBlock: number,
-  op20Only = false,
 ): TokenDeploymentRow[] {
-  const sql = op20Only
-    ? `SELECT * FROM token_deployments WHERE block_number >= ? AND is_op20 = 1 ORDER BY block_number ASC`
-    : `SELECT * FROM token_deployments WHERE block_number >= ? ORDER BY block_number ASC`;
-  return db.prepare(sql).all(sinceBlock) as unknown as TokenDeploymentRow[];
+  return db.prepare(
+    `SELECT * FROM token_deployments WHERE block_number >= ? ORDER BY block_number ASC`,
+  ).all(sinceBlock) as unknown as TokenDeploymentRow[];
 }
 
 // ---------------------------------------------------------------------------
-// DB helpers
+// Two-line TTY progress display
 // ---------------------------------------------------------------------------
 
-function upsertToken(
-  db: DatabaseSync,
-  address: string,
-  symbol: string,
-  name: string,
-  decimals: number,
-): void {
-  db.prepare(`
-    INSERT INTO tokens (address, symbol, name, decimals, updated_at)
-    VALUES (?, ?, ?, ?, unixepoch())
-    ON CONFLICT(address) DO UPDATE SET
-      symbol     = excluded.symbol,
-      name       = excluded.name,
-      decimals   = excluded.decimals,
-      updated_at = unixepoch()
-  `).run(address, symbol, name, decimals);
-}
+/**
+ * Creates a two-line rewriting progress display for TTY terminals.
+ * Returns null when stdout is not a TTY — scanner falls back to log().
+ *
+ * Display:
+ *   Overall  [============>..............] 45.2%  block 943721/952000  9.8 blk/s  ETA 1h 12m
+ *    Chunk   [=======>...................]  32.1%  block 943721/944394  9.8 blk/s  ETA 4m 12s  events: 123
+ *
+ * ANSI cursor control used:
+ *   \x1B[1A  — move cursor up one line
+ *   \r        — carriage return (go to column 0)
+ *   \x1B[2K  — erase entire line
+ */
+function createProgressDisplay(startBlock: number, totalBlocks: number) {
+  if (!process.stdout.isTTY) return null;
 
-function seedBuiltInTokens(db: DatabaseSync): void {
-  upsertToken(db, 'btc', 'BTC', 'Bitcoin', 8);
-  upsertToken(db, DEFAULT_MOTO_TOKEN_ADDRESS, 'MOTO', 'Motoswap Token', 8);
-}
+  const startTime = Date.now();
+  let active = false;
 
-// ---------------------------------------------------------------------------
-// Format helper
-// ---------------------------------------------------------------------------
+  return {
+    update(chunkStartOffset: number, doneInChunk: number, chunkLine: string): void {
+      const overallDone  = chunkStartOffset + doneInChunk;
+      const elapsedSec   = (Date.now() - startTime) / 1000;
+      const overallBps   = elapsedSec > 0 ? overallDone / elapsedSec : 0;
+      const remaining    = totalBlocks - overallDone;
+      const overallEta   = overallBps > 0 ? remaining / overallBps : 0;
+      const pct          = ((overallDone / totalBlocks) * 100).toFixed(1);
+      const bar          = progressBar(overallDone, totalBlocks, 25);
+      const currentBlock = startBlock + overallDone;
+      const endBlock     = startBlock + totalBlocks - 1;
+      const overallLine  =
+        `Overall  ${bar} ${pct.padStart(5)}%  block ${currentBlock}/${endBlock}  ` +
+        `${overallBps.toFixed(1)} blk/s  ETA ${humanElapsed(overallEta)}`;
 
-function humanElapsed(seconds: number): string {
-  if (seconds < 60) return `${seconds.toFixed(1)}s`;
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  if (m < 60) return `${m}m ${s}s`;
-  const h = Math.floor(m / 60);
-  return `${h}h ${m % 60}m ${s}s`;
+      if (active) {
+        // Move up 1 line, overwrite both lines (no trailing newline keeps cursor on chunk line)
+        process.stdout.write(`\x1B[1A\r\x1B[2K${overallLine}\n\r\x1B[2K${chunkLine}`);
+      } else {
+        process.stdout.write(`${overallLine}\n${chunkLine}`);
+        active = true;
+      }
+    },
+
+    finish(): void {
+      if (active) {
+        process.stdout.write('\n'); // commit the last chunk line
+        active = false;
+      }
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -108,7 +114,7 @@ function humanElapsed(seconds: number): string {
 
 /**
  * Testable bootstrap core — all dependencies injected.
- * Scans blocks in chunks, stores events, seeds built-in tokens.
+ * Scans blocks in chunks and stores all chain data.
  */
 export async function runBootstrapCore(
   db: DatabaseSync,
@@ -120,8 +126,6 @@ export async function runBootstrapCore(
   const fromBlockOverride = opts?.fromBlock ?? 0n;
   const rps = bootstrapRps ?? 10;
   const minIntervalMs = rps > 0 ? Math.floor(1000 / rps) : 0;
-
-  seedBuiltInTokens(db);
 
   const currentBlock = await client.getBlockNumber();
 
@@ -137,28 +141,38 @@ export async function runBootstrapCore(
 
   log('INFO', 'bootstrap', '');
   log('INFO', 'bootstrap', `  OpStream Bootstrap`);
-  log('INFO', 'bootstrap', `  Chain tip:    ${Number(currentBlock)}`);
-  log('INFO', 'bootstrap', `  Start block:  ${Number(startBlock)}`);
+  log('INFO', 'bootstrap', `  Chain tip:      ${Number(currentBlock)}`);
+  log('INFO', 'bootstrap', `  Start block:    ${Number(startBlock)}`);
   log('INFO', 'bootstrap', `  Blocks to scan: ${totalRange}`);
-  log('INFO', 'bootstrap', `  Rate limit:   ${rps} req/s`);
+  log('INFO', 'bootstrap', `  Rate limit:     ${rps} req/s`);
   log('INFO', 'bootstrap', '');
 
   const startTime = Date.now();
   let totalEvents = 0;
   let totalBlocks = 0;
 
+  // Two-line rewriting display on TTY; falls back to log() in scanner when null
+  const display = createProgressDisplay(Number(startBlock), totalRange);
+
   for (let chunkStart = startBlock; chunkStart <= currentBlock; chunkStart += chunkSize) {
     const chunkEnd = chunkStart + chunkSize - 1n <= currentBlock
       ? chunkStart + chunkSize - 1n
       : currentBlock;
 
+    const chunkStartOffset = Number(chunkStart - startBlock);
+
     const result = await scanBlockRange(db, client, chunkStart, chunkEnd, {
       minIntervalMs,
+      onProgress: display
+        ? (doneInChunk, chunkLine) => display.update(chunkStartOffset, doneInChunk, chunkLine)
+        : undefined,
     });
 
     totalEvents += result.eventsStored;
     totalBlocks += result.blocksScanned;
   }
+
+  display?.finish();
 
   const elapsedSec = (Date.now() - startTime) / 1000;
   const bps = totalBlocks > 0 ? (totalBlocks / elapsedSec).toFixed(1) : '0';
@@ -173,124 +187,11 @@ export async function runBootstrapCore(
 }
 
 // ---------------------------------------------------------------------------
-// DB migration repair (address normalization)
-// ---------------------------------------------------------------------------
-
-export async function normalizeTokenAddresses(
-  db: DatabaseSync,
-  client: OpnetRpcClient,
-): Promise<void> {
-  const { resolveTokenHexAddress } = await import('../readers/poolReaderSdk.js');
-
-  const op1sqTokens = db.prepare(
-    `SELECT address, symbol, name, decimals FROM tokens WHERE address LIKE 'op1sq%'`,
-  ).all() as unknown as { address: string; symbol: string; name: string; decimals: number }[];
-
-  if (op1sqTokens.length === 0) return;
-
-  log('INFO', 'bootstrap', `Normalizing ${op1sqTokens.length} op1sq token addresses to 0x hex...`);
-
-  let normalized = 0;
-  for (const tok of op1sqTokens) {
-    try {
-      const hexAddr = await resolveTokenHexAddress(client.provider, tok.address);
-      if (hexAddr === tok.address) {
-        log('WARN', 'bootstrap', `  ${tok.address.slice(0, 20)}... could not resolve to 0x — skipping`);
-        continue;
-      }
-
-      const existing = db.prepare('SELECT address FROM tokens WHERE address = ?').get(hexAddr);
-      if (existing) {
-        db.prepare(`UPDATE tokens SET alt_address = ? WHERE address = ?`).run(tok.address, hexAddr);
-        db.prepare(`DELETE FROM tokens WHERE address = ? AND address != ?`).run(tok.address, hexAddr);
-      } else {
-        db.prepare(`INSERT INTO tokens (address, alt_address, symbol, name, decimals, updated_at) VALUES (?, ?, ?, ?, ?, unixepoch())`).run(
-          hexAddr, tok.address, tok.symbol, tok.name, tok.decimals,
-        );
-        db.prepare(`DELETE FROM tokens WHERE address = ?`).run(tok.address);
-      }
-
-      log('INFO', 'bootstrap', `  ${tok.symbol}: ${tok.address.slice(0, 16)}... → ${hexAddr.slice(0, 18)}...`);
-      normalized++;
-    } catch (err) {
-      log('WARN', 'bootstrap', `  normalization failed for ${tok.address.slice(0, 20)}...`, {
-        error: String(err).slice(0, 120),
-      });
-    }
-  }
-
-  log('INFO', 'bootstrap', `Token normalization: ${normalized}/${op1sqTokens.length} tokens normalized`);
-}
-
-export async function refreshTokenMetadata(
-  db: DatabaseSync,
-  client: OpnetRpcClient,
-): Promise<void> {
-  const { readTokenMetadata: readTokenMetadataSdk } = await import('../readers/poolReaderSdk.js');
-
-  const tokens = db.prepare(
-    `SELECT address, alt_address, symbol, name, decimals FROM tokens WHERE address != 'btc'`,
-  ).all() as unknown as { address: string; alt_address: string | null; symbol: string | null; name: string | null; decimals: number }[];
-
-  if (tokens.length === 0) return;
-
-  log('INFO', 'bootstrap', `Refreshing metadata for ${tokens.length} tokens...`);
-
-  let updated = 0;
-  for (const tok of tokens) {
-    try {
-      let meta: { name: string; symbol: string; decimals: number } | null = null;
-      const rpcAddr = tok.alt_address ?? tok.address;
-      try {
-        meta = await readTokenMetadataSdk(client.provider, rpcAddr);
-      } catch {
-        if (rpcAddr !== tok.address) {
-          try { meta = await readTokenMetadataSdk(client.provider, tok.address); } catch { /* ignore */ }
-        }
-      }
-      if (!meta) continue;
-
-      const changed =
-        meta.decimals !== tok.decimals ||
-        (meta.symbol && meta.symbol !== tok.symbol) ||
-        (meta.name && meta.name !== tok.name);
-
-      if (changed) {
-        db.prepare(
-          `UPDATE tokens SET decimals = ?, symbol = ?, name = ?, updated_at = unixepoch() WHERE address = ?`,
-        ).run(meta.decimals, meta.symbol || tok.symbol, meta.name || tok.name, tok.address);
-
-        log('INFO', 'bootstrap', `  ${meta.symbol || tok.symbol}: decimals ${tok.decimals}→${meta.decimals}`, {
-          address: tok.address.slice(0, 18) + '...',
-        });
-        updated++;
-      }
-    } catch (err) {
-      log('WARN', 'bootstrap', `  metadata refresh failed for ${(tok.symbol ?? tok.address).slice(0, 16)}`, {
-        error: String(err).slice(0, 100),
-      });
-    }
-  }
-
-  log('INFO', 'bootstrap', `Token metadata refresh: ${updated}/${tokens.length} tokens updated`);
-}
-
-export async function runDbMigrationRepair(
-  db: DatabaseSync,
-  client: OpnetRpcClient,
-): Promise<void> {
-  log('INFO', 'bootstrap', 'DB migration repair starting...');
-  await normalizeTokenAddresses(db, client);
-  await refreshTokenMetadata(db, client);
-  log('INFO', 'bootstrap', 'DB migration repair complete');
-}
-
-// ---------------------------------------------------------------------------
-// CLI entry point
+// CLI entry points
 // ---------------------------------------------------------------------------
 
 /**
- * CLI entry point — called by `npx tsx src/main.ts bootstrap`.
+ * Called by `npx tsx src/main.ts bootstrap`.
  */
 export async function runBootstrap(): Promise<void> {
   const config = loadConfig();

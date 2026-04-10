@@ -57,15 +57,23 @@ explicitly out of scope. Updated as the system is tested and evolved.
 
 ### Unit-tested and verified
 
-These are covered by `tests/eventStore.test.ts` — run with `npx vitest run`:
+Run with `npx vitest run` (58 tests across 3 suites):
 
-| Feature | Test coverage |
-|---------|---------------|
-| `insertEvent` — single event insert | insert + read-back, null `decoded_json`, duplicate silently ignored |
-| `insertEventsBatch` — batch insert in one transaction | multi-event, empty array, within-batch dedup, `decoded_json` roundtrip |
-| `queryEvents` — filtered SQL query | all-events, by contract, by name, by block range, combined filters, empty result, ordering |
-| `backfillDecoded` — retroactive ABI decoding | decodes + updates, skips already-decoded, handles null from decoder, scoped to contract+event only |
-| `createTestDb` / `SqliteAdapter` | in-memory schema + migration runs cleanly for every test |
+| Suite | Feature | Coverage |
+|-------|---------|----------|
+| `eventStore` | `insertEvent` | insert + read-back, null `decoded_json`, duplicate silently ignored |
+| `eventStore` | `insertEventsBatch` | multi-event, empty array, within-batch dedup, `decoded_json` roundtrip |
+| `eventStore` | `queryEvents` | all-events, by contract, by name, by block range, combined filters, empty result, ordering |
+| `eventStore` | `backfillDecoded` | decodes + updates, skips already-decoded, null decoder, scoped to contract+event |
+| `webhooks` | `dispatch()` → broadcast | all enriched fields delivered via EventEmitter |
+| `webhooks` | `dispatch()` → WebSocket | valid RFC 6455 frame, all fields present in parsed JSON |
+| `webhooks` | `matchesPattern()` | contract, eventName, minAmount, combined, no regression from enriched fields |
+| `webhooks` | HTTP delivery + retry | POST body contains enriched fields; 4-attempt retry sequence |
+| `webhooks` | Server lifecycle | idempotent start, client eviction on write error, stop cleans up |
+| `scanner` | `onEvent` enrichment | logIndex, blockTimestamp, txIndex, fromAddress, gasUsed, burnedBitcoin, failed, revertReason, eventRaw |
+| `scanner` | logIndex sequencing | global counter per tx across all contracts |
+| `scanner` | DB side-effects | events, transactions, blocks tables written correctly; idempotent re-scan |
+| `scanner` | `ScanResult` | eventsStored, blocksScanned, null block handling |
 
 ### Code-complete and proven working end-to-end
 
@@ -279,9 +287,14 @@ WS_PORT=8080 npx tsx src/main.ts start
 const ws = new WebSocket('ws://localhost:8080');
 ws.onmessage = (msg) => {
   const event = JSON.parse(msg.data);
+  // event carries: blockNumber, txHash, contractAddress, eventName, decodedJson,
+  // logIndex, txIndex, blockTimestamp, fromAddress, gasUsed, burnedBitcoin,
+  // failed, revertReason, eventRaw
   console.log(event.eventName, event.contractAddress, event.blockNumber);
 };
 ```
+
+See [docs/websocket.md](./docs/websocket.md) for the full payload schema and client examples.
 
 ### Webhooks
 
@@ -358,16 +371,28 @@ OpStream's raw tables are the stable foundation; OpKit's derived tables are what
 ## Development
 
 ```bash
-npx vitest run     # tests
-npx tsc --noEmit   # type check
+npx vitest run     # run tests (58 tests)
 npx vitest         # watch mode
+npx tsc --noEmit   # type check
+npx eslint src tests  # lint
+
+just check         # typecheck + lint + test in one shot
 ```
+
+## Docs
+
+| Guide | What it covers |
+|-------|---------------|
+| [docs/configuration.md](./docs/configuration.md) | All environment variables, `.env` setup, Postgres, Docker |
+| [docs/websocket.md](./docs/websocket.md) | WS client setup, full enriched payload schema, multi-client |
+| [docs/webhooks.md](./docs/webhooks.md) | HTTP delivery, programmatic subscriptions, pattern matching, retry |
+| [docs/querying.md](./docs/querying.md) | SQL patterns, full schema reference, compound query examples |
+| [docs/opkit-integration.md](./docs/opkit-integration.md) | Tier 1/2/3 event sources, ABI decoder injection, DB layout |
 
 ## Tech Stack
 
 - Node.js 22+ (`node:sqlite` built-in)
 - TypeScript ESM (NodeNext)
-- SQLite WAL mode
-- WebSocket broadcast (no extra deps)
+- SQLite WAL mode / Postgres
+- WebSocket broadcast (no extra deps — pure `node:http` + `node:stream`)
 - opnet SDK (`JSONRpcProvider`)
-- `@opnet-devs/opkit` (event decoding)

@@ -7,7 +7,7 @@
  * The returned function cancels the timer (call on shutdown).
  */
 
-import type { DatabaseSync } from 'node:sqlite';
+import type Database from 'better-sqlite3';
 import type { OpStreamConfig } from './config.js';
 import { metrics } from './metrics.js';
 import { log } from './logger.js';
@@ -17,7 +17,7 @@ import { log } from './logger.js';
  *
  * @returns A cancel function — call it on shutdown to clear the interval.
  */
-export function startMetricsLogger(config: OpStreamConfig, db: DatabaseSync): () => void {
+export function startMetricsLogger(config: OpStreamConfig, db: Database.Database): () => void {
   const intervalMs = config.metricsIntervalSeconds * 1000;
 
   const timer = setInterval(() => {

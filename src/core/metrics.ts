@@ -13,7 +13,7 @@
  *   metrics.persistToDb(db)   — call on SIGINT / shutdown
  */
 
-import type { DatabaseSync } from 'node:sqlite';
+import type Database from 'better-sqlite3';
 
 export type MetricKey =
   | 'reserveUpdates'
@@ -64,7 +64,7 @@ export const metrics = {
    * Persist all counters to the `runtime_metrics` SQLite table.
    * Called on SIGINT / clean shutdown.
    */
-  persistToDb(db: DatabaseSync): void {
+  persistToDb(db: Database.Database): void {
     try {
       const snap = _counters;
       db.exec('BEGIN');
@@ -92,7 +92,7 @@ export const metrics = {
    * Load counters from the `runtime_metrics` table.
    * Called once on startup to restore previous session's counts.
    */
-  loadFromDb(db: DatabaseSync): void {
+  loadFromDb(db: Database.Database): void {
     try {
       const rows = db
         .prepare(`SELECT key, value FROM runtime_metrics`)

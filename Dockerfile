@@ -7,20 +7,36 @@
 #   docker build -f OpStream/Dockerfile -t opstream ..
 #
 # docker-compose.yml sets the context automatically — use that instead.
+#
+# Two-stage build: better-sqlite3 is a native addon that requires build tools.
+# We compile it in the builder stage and copy only the output to the slim runtime.
 
-FROM node:22-alpine
+# ── Stage 1: build (has compiler toolchain) ──────────────────────────────────
+FROM node:24-alpine AS builder
 
-# dumb-init: proper PID 1 signal handling (SIGTERM → clean shutdown)
-RUN apk add --no-cache dumb-init
+RUN apk add --no-cache python3 make g++
 
 WORKDIR /app
 
 # Copy OpKit to the path package.json expects: file:../OpKit → /OpKit
 COPY OpKit/ /OpKit/
 
-# Install dependencies (OpStream only — OpKit resolved via file: path above)
+# Install dependencies (compiles better-sqlite3 native addon here)
 COPY OpStream/package*.json ./
 RUN npm install --prefer-offline
+
+# ── Stage 2: runtime (no build tools — slimmer image) ────────────────────────
+FROM node:24-alpine AS runtime
+
+# dumb-init: proper PID 1 signal handling (SIGTERM → clean shutdown)
+RUN apk add --no-cache dumb-init
+
+WORKDIR /app
+
+# Bring in OpKit and compiled node_modules from the builder
+COPY --from=builder /OpKit /OpKit
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package*.json ./
 
 # Copy source
 COPY OpStream/src/        ./src/

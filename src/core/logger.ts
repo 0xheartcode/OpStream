@@ -16,7 +16,7 @@
  *   Call pruneErrorLog(db) on startup to remove rows older than 30 days.
  */
 
-import type { DatabaseSync } from 'node:sqlite';
+import type Database from 'better-sqlite3';
 import type { DbAdapter } from './dbAdapter.js';
 
 export type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
@@ -38,7 +38,7 @@ const LEVEL_ORDER: Record<LogLevel, number> = {
 type LogEntry = [ts: string, level: string, component: string, message: string, dataJson: string | null];
 
 let _logAdapter: DbAdapter | null = null;
-let _logDb: DatabaseSync | null = null;      // SQLite fast path (kept for pruneErrorLog / queryRecentErrors)
+let _logDb: Database.Database | null = null;      // SQLite fast path (kept for pruneErrorLog / queryRecentErrors)
 const _logQueue: LogEntry[] = [];
 let _flushScheduled = false;
 
@@ -69,7 +69,7 @@ export function setLogAdapter(adapter: DbAdapter | null): void {
   _logAdapter = adapter;
   // Also set _logDb for the synchronous helpers when it's a SQLite adapter
   if (adapter && 'rawDb' in adapter) {
-    _logDb = (adapter as { rawDb: DatabaseSync }).rawDb;
+    _logDb = (adapter as { rawDb: Database.Database }).rawDb;
   } else {
     _logDb = null;
   }
@@ -77,9 +77,9 @@ export function setLogAdapter(adapter: DbAdapter | null): void {
 
 /**
  * @deprecated Use setLogAdapter(adapter) instead.
- * Kept for backward compatibility — wraps DatabaseSync directly.
+ * Kept for backward compatibility — wraps Database.Database directly.
  */
-export function setLogDb(db: DatabaseSync | null): void {
+export function setLogDb(db: Database.Database | null): void {
   _logDb = db;
   // Detach the adapter too so we don't double-write
   _logAdapter = null;
@@ -89,7 +89,7 @@ export function setLogDb(db: DatabaseSync | null): void {
  * Delete error_log rows older than `olderThanDays` days.
  * Requires SQLite backend (synchronous). No-op when Postgres is in use.
  */
-export function pruneErrorLog(db: DatabaseSync, olderThanDays = 30): void {
+export function pruneErrorLog(db: Database.Database, olderThanDays = 30): void {
   const cutoff = Math.floor(Date.now() / 1000) - olderThanDays * 86_400;
   db.prepare('DELETE FROM error_log WHERE created_at < ?').run(cutoff);
 }
@@ -99,7 +99,7 @@ export function pruneErrorLog(db: DatabaseSync, olderThanDays = 30): void {
  * Requires SQLite backend (synchronous). Returns [] when Postgres is in use.
  */
 export function queryRecentErrors(
-  db: DatabaseSync,
+  db: Database.Database,
   limit = 100,
 ): Array<{ id: number; timestamp: string; level: string; component: string; message: string; data_json: string | null }> {
   return db.prepare(

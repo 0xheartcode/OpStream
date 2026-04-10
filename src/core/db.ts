@@ -17,7 +17,7 @@
  *   error_log          Error tracking
  */
 
-import { DatabaseSync } from 'node:sqlite';
+import Database from 'better-sqlite3';
 import { mkdirSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { DbAdapter } from './dbAdapter.js';
@@ -141,13 +141,13 @@ CREATE INDEX IF NOT EXISTS idx_error_log_created ON error_log(created_at);
 `;
 
 let _adapter: DbAdapter | null = null;
-let _rawDb: DatabaseSync | null = null; // SQLite only — exposed for logger (sync writes to error_log)
+let _rawDb: Database.Database | null = null; // SQLite only — exposed for logger (sync writes to error_log)
 
 /**
  * Applies schema migrations for columns added after initial deployment.
  * Safe to call on both new and existing databases.
  */
-function runMigrations(db: DatabaseSync): void {
+function runMigrations(db: Database.Database): void {
   try {
     // alt_address for dual address format support (op1sq bech32m + 0x hex)
     const tokenCols = db.prepare('PRAGMA table_info(tokens)').all() as Array<{ name: string }>;
@@ -259,7 +259,7 @@ export function openDb(path: string): DbAdapter {
   if (dir && dir !== '.' && !existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }
-  const raw = new DatabaseSync(path);
+  const raw = new Database(path);
   raw.exec('PRAGMA busy_timeout = 5000;');
   raw.exec(SCHEMA);
   runMigrations(raw);
@@ -271,11 +271,11 @@ export function openDb(path: string): DbAdapter {
 /**
  * Creates an isolated in-memory SQLite DbAdapter for unit tests.
  * Never use in production — data is lost when the process exits.
- * Access the underlying DatabaseSync via (adapter as SqliteAdapter).rawDb
+ * Access the underlying Database.Database via (adapter as SqliteAdapter).rawDb
  * for direct verification queries in tests.
  */
 export function createTestDb(): DbAdapter {
-  const raw = new DatabaseSync(':memory:');
+  const raw = new Database(':memory:');
   raw.exec(SCHEMA);
   runMigrations(raw);
   return new SqliteAdapter(raw);
@@ -287,11 +287,11 @@ export function getDb(): DbAdapter {
 }
 
 /**
- * Returns the underlying DatabaseSync when running in SQLite mode.
+ * Returns the underlying Database.Database when running in SQLite mode.
  * Used by the logger to persist WARN/ERROR rows synchronously.
  * Returns null in Postgres mode.
  */
-export function getRawDb(): DatabaseSync | null {
+export function getRawDb(): Database.Database | null {
   return _rawDb;
 }
 

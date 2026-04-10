@@ -1,25 +1,25 @@
 /**
- * SqliteAdapter — DbAdapter implementation backed by node:sqlite (DatabaseSync).
+ * SqliteAdapter — DbAdapter implementation backed by better-sqlite3.
  *
  * All DbAdapter methods are async-compatible but resolve synchronously — the
  * SQLite API is blocking. Statement caching avoids re-preparing on every call,
  * matching the performance of the old prepare()-outside-loop pattern.
  */
 
-import type { DatabaseSync, StatementSync } from 'node:sqlite';
+import type Database from 'better-sqlite3';
 import type { DbAdapter } from './dbAdapter.js';
 
 export class SqliteAdapter implements DbAdapter {
   readonly dialect = 'sqlite' as const;
 
-  private readonly _stmtCache = new Map<string, StatementSync>();
+  private readonly _stmtCache = new Map<string, Database.Statement>();
 
   constructor(
-    /** The underlying DatabaseSync instance — exposed for logger and migrations. */
-    public readonly rawDb: DatabaseSync,
+    /** The underlying better-sqlite3 Database instance — exposed for logger and migrations. */
+    public readonly rawDb: Database.Database,
   ) {}
 
-  private stmt(sql: string): StatementSync {
+  private stmt(sql: string): Database.Statement {
     let s = this._stmtCache.get(sql);
     if (!s) {
       s = this.rawDb.prepare(sql);
@@ -29,15 +29,15 @@ export class SqliteAdapter implements DbAdapter {
   }
 
   async run(sql: string, params: unknown[] = []): Promise<void> {
-    this.stmt(sql).run(...(params as Parameters<StatementSync['run']>));
+    this.stmt(sql).run(...params);
   }
 
   async get<T = Record<string, unknown>>(sql: string, params: unknown[] = []): Promise<T | undefined> {
-    return this.stmt(sql).get(...(params as Parameters<StatementSync['get']>)) as T | undefined;
+    return this.stmt(sql).get(...params) as T | undefined;
   }
 
   async all<T = Record<string, unknown>>(sql: string, params: unknown[] = []): Promise<T[]> {
-    return this.stmt(sql).all(...(params as Parameters<StatementSync['all']>)) as T[];
+    return this.stmt(sql).all(...params) as T[];
   }
 
   async exec(sql: string): Promise<void> {

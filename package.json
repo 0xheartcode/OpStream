@@ -4,7 +4,7 @@
   "description": "Chain scanner & indexer for OPNET — RPC clients, bootstrap scanner, event store, candles, snapshots, pool readers, live indexer",
   "type": "module",
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=24.0.0"
   },
   "exports": {
     ".": "./src/index.ts",
@@ -20,13 +20,15 @@
   "dependencies": {
     "@btc-vision/bitcoin-rpc": "^1.1.2",
     "@btc-vision/transaction": "^1.8.6",
+    "better-sqlite3": "^12.0.0",
     "dotenv": "^16.4.5",
     "opnet": "^1.8.13",
     "postgres": "^3.4.5"
   },
   "devDependencies": {
     "@eslint/js": "^9.0.0",
-    "@types/node": "^22.0.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "typescript-eslint": "^8.0.0",

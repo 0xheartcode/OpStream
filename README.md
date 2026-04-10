@@ -50,6 +50,115 @@ npx tsx src/main.ts bootstrap   # scan to chain tip and exit
 npx tsx src/main.ts live        # follow tip only (assumes caught up)
 ```
 
+## Status — What Works
+
+This section records what has been proven to work, what is code-complete, and what is
+explicitly out of scope. Updated as the system is tested and evolved.
+
+### Unit-tested and verified
+
+These are covered by `tests/eventStore.test.ts` — run with `npx vitest run`:
+
+| Feature | Test coverage |
+|---------|---------------|
+| `insertEvent` — single event insert | insert + read-back, null `decoded_json`, duplicate silently ignored |
+| `insertEventsBatch` — batch insert in one transaction | multi-event, empty array, within-batch dedup, `decoded_json` roundtrip |
+| `queryEvents` — filtered SQL query | all-events, by contract, by name, by block range, combined filters, empty result, ordering |
+| `backfillDecoded` — retroactive ABI decoding | decodes + updates, skips already-decoded, handles null from decoder, scoped to contract+event only |
+| `createTestDb` / `SqliteAdapter` | in-memory schema + migration runs cleanly for every test |
+
+### Code-complete and proven working end-to-end
+
+These have been run against mainnet and produce correct output:
+
+**Bootstrap scanner** (`just bootstrap` / `npx tsx src/main.ts bootstrap`)
+- Scans blocks in configurable chunks (default 500), checkpoint-resumable across restarts
+- Two-line TTY progress display (`Overall` / `Chunk` bars with ETA) — degrades to `log()` when not a TTY
+- Rate limiting via `BOOTSTRAP_RPS` (default 10 req/s)
+- Single SQLite transaction per block — all-or-nothing write; skips block on failure with `WARN` log
+- Saves `scan_checkpoints` every chunk end so a crash loses at most one chunk
+- Detects and stores: blocks, transactions, tx_outputs, events (raw + decoded), token deployments
+
+**Live indexer** (`just live` / `npx tsx src/main.ts live`)
+- Polls `getBlockNumber()` every 30 s, scans `[checkpoint+1, chainTip]` each cycle
+- Reorg detection: checks stored block hashes up to 10 blocks deep — rolls back and re-scans from fork point automatically
+- Emits per-event callbacks (used for WebSocket/webhook dispatch)
+- Returns a `LiveIndexerHandle` with `.stop()` and `.health()`
+
+**SQLite backend** (`src/core/db.ts` + `src/core/sqliteAdapter.ts`)
+- WAL mode, `busy_timeout = 5000`, `foreign_keys = ON`
+- Schema applied idempotently on every open (safe to re-run)
+- Migrations: `alt_address` on `tokens`, `log_index` on `events`, `transactions`, `tx_outputs`, `blocks` — applied automatically on existing DBs
+- Singleton pattern (`openDb()` returns the same adapter instance)
+
+**OpnetRpcClient** (`src/rpc/opnetRpc.ts`)
+- `getBlock(n)` — 5 s timeout via `Promise.race`, returns `null` on timeout
+- Exponential backoff on consecutive failures: 1 s → 2 s → 4 s
+- Circuit breaker: after 3 consecutive failures, `getBlock()` returns `null` immediately; resets on next success
+- `getBlockNumber()` — same 5 s timeout
+- `getLogs(filter)` — scan-based polyfill (OPNET has no native `eth_getLogs`)
+- `scanForTransactions()` — preserves full cross-contract event context per tx
+- `call(address, calldata)` — simulates contract reads, returns raw bytes or `null` on revert
+- `getCode(address)` — returns `true` if a contract is deployed at the address
+
+**Transaction indexing** (`src/indexer/scanner.ts`)
+- Every `interaction` tx stores: `calldata` (BLOB), `calldata_length`, `senderPubKeyHash`
+- Every tx stores: `gasUsed`, `specialGasUsed`, `burnedBitcoin`, `priorityFee`, `maxGasSat`, `failed`, `revertReason`
+- `tx_outputs` captured for every tx (UTXO index, value in satoshis, script type, recipient address)
+- `token_deployments` captured for every `deployment` tx (deployer address, bytecode SHA-256 hash prefix)
+
+**SubscriptionManager / webhooks** (`src/indexer/webhooks.ts`)
+- Pattern matching: `contract` (case-insensitive), `eventName`, `minAmount` (from `decoded_json`)
+- HTTP POST delivery with 3 retries, exponential backoff (1 s → 2 s → 4 s), 5 s per-request timeout
+- `WEBHOOK_URLS` env var auto-registers comma-separated URLs as catch-all subscriptions on startup
+- Emits `'broadcast'` EventEmitter event for in-process consumers
+
+**WebSocket broadcast server** (`webhooks.ts` — `startBroadcastServer(port)`)
+- Minimal Node.js HTTP server, no extra deps
+- RFC 6455 handshake (`SHA-1 Sec-WebSocket-Accept`)
+- Correct frame encoding for text payloads (handles short, 16-bit, and 64-bit length)
+- Enabled by setting `WS_PORT` env var (disabled when `WS_PORT=0`)
+
+**Postgres backend** (`src/core/postgresAdapter.ts`)
+- Full `DbAdapter` implementation — `run`, `get`, `all`, `exec`, `transaction`, `close`
+- `?` placeholders auto-converted to `$1, $2, ...` (SQLite compatibility shim)
+- Schema applied idempotently on `openPostgresDb()`
+- `postgres.begin()` for transactions — correctly scopes nested `txSql`
+- Enabled by setting `DB_URL=postgres://user:pass@host:5432/dbname`
+
+**Logger** (`src/core/logger.ts`)
+- WARN/ERROR rows persisted to `error_log` — synchronously in SQLite mode, async write-behind queue in Postgres mode
+- `pruneErrorLog` and `queryRecentErrors` for maintenance
+
+**poolReaderSdk** (`src/readers/poolReaderSdk.ts`) — code complete, not unit-tested
+- `readTokenMetadata` — name, symbol, decimals via OP-20 ABI
+- `readMotoswapReserves` — `reserve0`, `reserve1` from a Motoswap pair
+- `readMotoswapPairTokens` — `token0`, `token1` from a pair contract
+- `readMotoswapPairAddress` — look up pair from Motoswap factory for two tokens
+- `resolveTokenHexAddress` — normalize `op1sq` bech32m → `0x` 32-byte hex via `getPublicKeysInfoRaw`
+- `readNativeSwapReserves` — `btcReserve`, `tokenReserve` from the NativeSwap factory
+
+### Known limitations
+
+- **No native `getLogs` on OPNET** — `getLogs()` is a scan-based polyfill. Always prefer querying the local SQLite DB at runtime.
+- **Reorg detection is 10-block max** — deeper reorgs trigger a `WARN` and roll back 10 blocks. Has not occurred on OPNET mainnet in practice.
+- **Checkpoint granularity** — saved once per chunk (default 500 blocks). A crash mid-chunk re-scans the whole chunk. `ON CONFLICT DO NOTHING` makes re-scanning idempotent.
+- **Single-process only** — `openDb()` is a singleton. Two processes against the same SQLite file will conflict on writes.
+
+### Not part of OpStream (moved to `src/_pending_extraction/`)
+
+These files exist for reference but **must not be imported** — they belong in OpKit (Layer 3):
+
+| File | What it is | Where it belongs |
+|------|------------|-----------------|
+| `candles.ts` | OHLCV candle aggregation from reserve snapshots | OpKit handler |
+| `snapshots.ts` | Reserve snapshot storage + implied price math | OpKit handler |
+| `poolReader.ts` | Raw BinaryWriter/BinaryReader ABI encoding | OpKit reader layer |
+| `candles.test.ts` | Tests for the above (depend on removed `reserve_snapshots` table) | OpKit tests |
+
+Pool discovery logic (`processNativeSwapPools`, `processMotoswapPools`, etc.) was removed from
+`bootstrap.ts` in the Layer 2 cleanup and will be reimplemented as OpKit event handlers.
+
 ## Commands
 
 | Command | Description |
@@ -201,39 +310,50 @@ manager.on('broadcast', (event) => {
 
 ## How OpKit Consumes OpStream
 
-OpKit's `createIndexer` processes raw events from OpStream through registered handlers
-into a typed entity store:
+OpKit reads directly from OpStream's database (source) and writes derived, indexed state into
+its own tables (sink). The two databases can be separate SQLite files or the same Postgres
+database — OpKit's `opkit_*` table prefix prevents collisions either way.
 
 ```typescript
-import { defineSchema, createIndexer } from '@opnet-devs/opkit';
-import { openDb, queryEvents } from '@opnet-devs/opstream';
+import { defineSchema, createIndexer, DbEventSource, openSqlite } from '@opnet-devs/opkit';
 
 const schema = defineSchema({
   Transfer: {
     from:  { type: 'string' },
     to:    { type: 'string' },
     value: { type: 'bigint' },
+    block: { type: 'int' },
   },
 });
 
-const indexer = createIndexer({ schema });
+// source — reads from OpStream's events/transactions/blocks tables (read-only)
+// sink   — OpKit's own database for derived opkit_* tables
+const source = new DbEventSource(openSqlite('data/opstream.db'));
+const sink   = openSqlite('data/opkit.db');
 
-indexer.on('Transfer', (event, ctx) => {
+const indexer = await createIndexer({ schema, sink, source });
+
+indexer.on('Transferred', async (event, ctx) => {
   if (!event.decoded) return;
-  ctx.store.set('Transfer', event.txHash, {
-    from:  event.decoded.from,
-    to:    event.decoded.to,
-    value: BigInt(event.decoded.value),
+  await ctx.store.set('Transfer', event.txHash, {
+    from:  event.decoded['from'] as string,
+    to:    event.decoded['to'] as string,
+    value: BigInt(event.decoded['value'] as string),
+    block: event.blockNumber,
+    // event.fromAddress, event.gasUsed, event.failed, event.blockTimestamp
+    // are all available — populated by the JOIN OpKit runs against OpStream's tables
   });
 });
 
-// Backfill from OpStream
-const db = openDb('data/opstream.db');
-const events = queryEvents(db, { eventName: 'Transfer' });
-// indexer.processEvents(events);
+// Backfill all historical blocks
+await indexer.sync(941400, currentBlock);
+
+// Then go live — polls OpStream DB every 10s for new events
+const stop = indexer.subscribe(currentBlock + 1);
 ```
 
-OpStream doesn't change when you add a new event type. You add a handler in OpKit.
+OpStream doesn't change when you add a new event type or entity. You add a handler in OpKit.
+OpStream's raw tables are the stable foundation; OpKit's derived tables are what your app queries.
 
 ## Development
 

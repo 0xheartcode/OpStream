@@ -275,4 +275,72 @@ doctor:
     else
         echo "  ${YELLOW}⚠${RESET}  logs/ missing — PM2 will create it on first start"
     fi
+
+    # Docker
+    if command -v docker >/dev/null 2>&1; then
+        echo "  ${GREEN}✔${RESET}  docker $(docker --version | cut -d' ' -f3 | tr -d ',')"
+    else
+        echo "  ${YELLOW}⚠${RESET}  docker — not found (optional, for containerised deployment)"
+    fi
     echo ""
+
+# ══════════════════════════════════════════════════════════════════════════════
+# §7  Docker
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Build the Docker image (context: Opnet-devs/ parent for local OpKit dep)
+docker-build:
+    @echo "${BLUE}▶ Building Docker image...${RESET}"
+    docker compose build
+    @echo "${GREEN}✔ Image built${RESET}"
+
+# Start in background
+docker-up:
+    @echo "${BLUE}▶ Starting OpStream container...${RESET}"
+    docker compose up -d
+    @echo "${GREEN}✔ Running — 'just docker-logs' to follow output${RESET}"
+
+# Start in foreground (logs visible, Ctrl+C to stop)
+docker-fg:
+    docker compose up
+
+# Stop and remove container (data in ./data/ is preserved)
+docker-down:
+    @echo "${YELLOW}▶ Stopping OpStream container...${RESET}"
+    docker compose down
+
+# Restart the container
+docker-restart:
+    docker compose restart opstream
+
+# Rebuild image and redeploy (after code changes)
+docker-redeploy: docker-build
+    @echo "${YELLOW}▶ Redeploying...${RESET}"
+    docker compose down
+    docker compose up -d
+    @echo "${GREEN}✔ Redeployed${RESET}"
+
+# Stream container logs (Ctrl+C to exit)
+docker-logs:
+    docker compose logs -f opstream
+
+# Show container status and health
+docker-status:
+    docker compose ps
+
+# Open a shell inside the running container
+docker-shell:
+    docker compose exec opstream sh
+
+# Remove image + volumes (destructive — does NOT delete ./data on host)
+docker-clean:
+    #!/usr/bin/env bash
+    echo "${RED}${BOLD}⚠  This removes the Docker image and named volumes.${RESET}"
+    echo "   ./data/ on the host is NOT affected."
+    read -r -p "Type 'yes' to confirm: " CONFIRM
+    if [ "$CONFIRM" = "yes" ]; then
+        docker compose down --rmi local --volumes
+        echo "${GREEN}✔ Cleaned${RESET}"
+    else
+        echo "${YELLOW}Aborted${RESET}"
+    fi

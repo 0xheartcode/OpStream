@@ -6,7 +6,14 @@
  */
 
 import { getContract, OP_20_ABI, NativeSwapAbi, MotoswapPoolAbi, MotoSwapFactoryAbi } from 'opnet';
-import type { JSONRpcProvider, BaseContractProperties, CallResult } from 'opnet';
+import type {
+  JSONRpcProvider,
+  IOP20Contract,
+  IMotoswapPoolContract,
+  IMotoswapFactoryContract,
+  INativeSwapContract,
+  PublicKeyInfo,
+} from 'opnet';
 import type { BitcoinInterfaceAbi } from 'opnet';
 import { networks } from '@btc-vision/bitcoin';
 import type { Network } from '@btc-vision/bitcoin';
@@ -19,16 +26,15 @@ const NETWORK: Network = networks.bitcoin;
 
 // ─── Helper to safely call a contract method ─────────────────────────────────
 
-async function safeCall<T>(
+async function safeCall<TProps, TOut>(
   label: string,
-  fn: () => Promise<CallResult>,
-  extract: (props: Record<string, unknown>) => T,
-  fallback: T,
-): Promise<T> {
+  fn: () => Promise<{ properties: TProps }>,
+  extract: (props: TProps) => TOut,
+  fallback: TOut,
+): Promise<TOut> {
   try {
     const result = await fn();
-    const props = (result as { properties: Record<string, unknown> }).properties;
-    return extract(props);
+    return extract(result.properties);
   } catch (err) {
     log('WARN', 'poolReaderSdk', `${label} failed`, { error: String(err).slice(0, 120) });
     return fallback;
@@ -44,7 +50,7 @@ export async function readTokenMetadata(
   provider: JSONRpcProvider,
   tokenAddress: string,
 ): Promise<{ name: string; symbol: string; decimals: number }> {
-  const contract = getContract<BaseContractProperties>(
+  const contract = getContract<IOP20Contract>(
     tokenAddress,
     OP_20_ABI as unknown as BitcoinInterfaceAbi,
     provider,
@@ -52,9 +58,9 @@ export async function readTokenMetadata(
   );
 
   const [name, symbol, decimals] = await Promise.all([
-    safeCall('name', () => (contract as any).name(), (p: any) => String(p.name ?? ''), ''),
-    safeCall('symbol', () => (contract as any).symbol(), (p: any) => String(p.symbol ?? ''), ''),
-    safeCall('decimals', () => (contract as any).decimals(), (p: any) => Number(p.decimals ?? 8), 8),
+    safeCall('name', () => contract.name(), (p) => String(p.name ?? ''), ''),
+    safeCall('symbol', () => contract.symbol(), (p) => String(p.symbol ?? ''), ''),
+    safeCall('decimals', () => contract.decimals(), (p) => Number(p.decimals ?? 8), 8),
   ]);
 
   return { name, symbol, decimals };
@@ -69,7 +75,7 @@ export async function readMotoswapReserves(
   provider: JSONRpcProvider,
   pairAddress: string,
 ): Promise<{ reserve0: bigint; reserve1: bigint }> {
-  const contract = getContract<BaseContractProperties>(
+  const contract = getContract<IMotoswapPoolContract>(
     pairAddress,
     MotoswapPoolAbi as unknown as BitcoinInterfaceAbi,
     provider,
@@ -78,8 +84,8 @@ export async function readMotoswapReserves(
 
   return safeCall(
     'getReserves',
-    () => (contract as any).getReserves(),
-    (p: any) => ({
+    () => contract.getReserves(),
+    (p) => ({
       reserve0: BigInt(p.reserve0 ?? 0),
       reserve1: BigInt(p.reserve1 ?? 0),
     }),
@@ -94,7 +100,7 @@ export async function readMotoswapPairTokens(
   provider: JSONRpcProvider,
   pairAddress: string,
 ): Promise<{ token0: string; token1: string } | null> {
-  const contract = getContract<BaseContractProperties>(
+  const contract = getContract<IMotoswapPoolContract>(
     pairAddress,
     MotoswapPoolAbi as unknown as BitcoinInterfaceAbi,
     provider,
@@ -103,8 +109,8 @@ export async function readMotoswapPairTokens(
 
   try {
     const [t0Result, t1Result] = await Promise.all([
-      (contract as any).token0(),
-      (contract as any).token1(),
+      contract.token0(),
+      contract.token1(),
     ]);
     return {
       token0: String(t0Result.properties.token0),
@@ -133,14 +139,14 @@ export async function readMotoswapPairAddress(
     const addr0 = Address.fromString(token0.startsWith('0x') ? token0.slice(2) : token0);
     const addr1 = Address.fromString(token1.startsWith('0x') ? token1.slice(2) : token1);
 
-    const contract = getContract<BaseContractProperties>(
+    const contract = getContract<IMotoswapFactoryContract>(
       factoryAddress,
       MotoSwapFactoryAbi as unknown as BitcoinInterfaceAbi,
       provider,
       NETWORK,
     );
-    const result = await (contract as any).getPool(addr0, addr1);
-    const pool = String(result?.properties?.pool ?? '');
+    const result = await contract.getPool(addr0, addr1);
+    const pool = String(result.properties.pool ?? '');
     if (!pool || pool === 'undefined' || pool.length < 10) return null;
     return pool;
   } catch (err) {
@@ -164,9 +170,11 @@ export async function resolveTokenHexAddress(
 ): Promise<string> {
   if (address.startsWith('0x') || address === 'btc') return address;
   try {
-    const raw = await (provider as any).getPublicKeysInfoRaw(address);
-    const info = raw[address] as { tweakedPubkey?: string } | undefined;
-    if (info?.tweakedPubkey) return '0x' + info.tweakedPubkey;
+    const raw = await provider.getPublicKeysInfoRaw(address);
+    const info = raw[address];
+    if (info && 'tweakedPubkey' in info && (info as PublicKeyInfo).tweakedPubkey) {
+      return '0x' + (info as PublicKeyInfo).tweakedPubkey;
+    }
   } catch {
     // fall through — return original on failure
   }
@@ -185,26 +193,25 @@ export async function readNativeSwapReserves(
 ): Promise<{ btcReserve: bigint; tokenReserve: bigint }> {
   try {
     const { Address } = await import('@btc-vision/transaction');
-    const raw = await (provider as any).getPublicKeysInfoRaw(tokenAddress);
+    const raw = await provider.getPublicKeysInfoRaw(tokenAddress);
     const info = raw[tokenAddress];
-    if (!info?.tweakedPubkey) {
+    if (!info || !('tweakedPubkey' in info) || !(info as PublicKeyInfo).tweakedPubkey) {
       throw new Error(`No tweaked pubkey for ${tokenAddress}`);
     }
-    const addr = Address.fromString(info.tweakedPubkey);
+    const addr = Address.fromString((info as PublicKeyInfo).tweakedPubkey!);
 
-    const contract = getContract<BaseContractProperties>(
+    const contract = getContract<INativeSwapContract>(
       factoryAddress,
       NativeSwapAbi as unknown as BitcoinInterfaceAbi,
       provider,
       NETWORK,
     );
 
-    const result = await (contract as any).getReserve(addr);
-    const props = (result as { properties: Record<string, unknown> }).properties;
+    const result = await contract.getReserve(addr);
 
     return {
-      btcReserve: BigInt(props.virtualBTCReserve as string | number ?? 0),
-      tokenReserve: BigInt(props.virtualTokenReserve as string | number ?? 0),
+      btcReserve: result.properties.virtualBTCReserve,
+      tokenReserve: result.properties.virtualTokenReserve,
     };
   } catch (err) {
     log('WARN', 'poolReaderSdk', 'readNativeSwapReserves failed', {

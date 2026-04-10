@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { createTestDb } from '../src/core/db.js';
-import { SqliteAdapter } from '../src/core/sqliteAdapter.js';
+import type { SqliteAdapter } from '../src/core/sqliteAdapter.js';
 import type { DbAdapter } from '../src/core/dbAdapter.js';
 import {
   insertEvent,

@@ -4,9 +4,10 @@
  * This module knows nothing about pools, reserves, candles, or DEX-specific
  * logic. It is the generic Layer 2 engine that powers both bootstrap and
  * live indexing.
+ *
+ * All SQL uses ANSI ON CONFLICT syntax (compatible with SQLite 3.24+ and Postgres).
  */
 
-import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import {
   InteractionTransaction,
@@ -15,6 +16,7 @@ import {
   TransactionBase,
 } from 'opnet';
 import { log } from '../core/logger.js';
+import type { DbAdapter } from '../core/dbAdapter.js';
 import type { EventInput } from './eventStore.js';
 import { decodeEvent } from '@opnet-devs/opkit';
 import type { OpnetRpcClient } from '../rpc/opnetRpc.js';
@@ -124,59 +126,96 @@ function hashBytecode(bytecode: Uint8Array | string | undefined): string {
 
 const SCAN_TYPE_INDEXER = 'indexer';
 
-export function getCheckpoint(db: DatabaseSync): bigint {
-  const row = db.prepare(
-    'SELECT last_block FROM scan_checkpoints WHERE scan_type = ?',
-  ).get(SCAN_TYPE_INDEXER) as { last_block: number } | undefined;
+const SQL_GET_CHECKPOINT = `SELECT last_block FROM scan_checkpoints WHERE scan_type = ?`;
+const SQL_SAVE_CHECKPOINT = `
+  INSERT INTO scan_checkpoints (scan_type, last_block, updated_at)
+  VALUES (?, ?, ?)
+  ON CONFLICT (scan_type) DO UPDATE SET
+    last_block = excluded.last_block,
+    updated_at = excluded.updated_at
+`;
+
+export async function getCheckpoint(db: DbAdapter): Promise<bigint> {
+  const row = await db.get<{ last_block: number }>(SQL_GET_CHECKPOINT, [SCAN_TYPE_INDEXER]);
   return row ? BigInt(row.last_block) : 0n;
 }
 
-export function saveCheckpoint(db: DatabaseSync, block: bigint): void {
-  db.prepare(`
-    INSERT INTO scan_checkpoints (scan_type, last_block, updated_at)
-    VALUES (?, ?, unixepoch())
-    ON CONFLICT(scan_type) DO UPDATE SET
-      last_block = excluded.last_block,
-      updated_at = unixepoch()
-  `).run(SCAN_TYPE_INDEXER, Number(block));
+export async function saveCheckpoint(db: DbAdapter, block: bigint): Promise<void> {
+  await db.run(SQL_SAVE_CHECKPOINT, [SCAN_TYPE_INDEXER, Number(block), Math.floor(Date.now() / 1000)]);
 }
 
 // ---------------------------------------------------------------------------
 // Block helpers (reorg detection + metadata)
 // ---------------------------------------------------------------------------
 
-export function saveBlock(
-  db: DatabaseSync,
+const SQL_SAVE_BLOCK = `
+  INSERT INTO blocks (block_number, block_hash, timestamp, tx_count)
+  VALUES (?, ?, ?, ?)
+  ON CONFLICT (block_number) DO UPDATE SET
+    block_hash = excluded.block_hash,
+    timestamp  = excluded.timestamp,
+    tx_count   = excluded.tx_count
+`;
+const SQL_GET_BLOCK_HASH = `SELECT block_hash FROM blocks WHERE block_number = ?`;
+
+export async function saveBlock(
+  db: DbAdapter,
   blockNumber: number,
   blockHash: string,
   timestamp: number | null,
   txCount: number,
-): void {
-  db.prepare(`
-    INSERT OR REPLACE INTO blocks (block_number, block_hash, timestamp, tx_count)
-    VALUES (?, ?, ?, ?)
-  `).run(blockNumber, blockHash, timestamp, txCount);
+): Promise<void> {
+  await db.run(SQL_SAVE_BLOCK, [blockNumber, blockHash, timestamp, txCount]);
 }
 
-export function getBlockHash(db: DatabaseSync, blockNumber: number): string | null {
-  const row = db.prepare(
-    'SELECT block_hash FROM blocks WHERE block_number = ?',
-  ).get(blockNumber) as { block_hash: string } | undefined;
+export async function getBlockHash(db: DbAdapter, blockNumber: number): Promise<string | null> {
+  const row = await db.get<{ block_hash: string }>(SQL_GET_BLOCK_HASH, [blockNumber]);
   return row?.block_hash ?? null;
 }
 
-export function deleteBlockDataFrom(db: DatabaseSync, fromBlock: number): void {
-  // Delete tx_outputs via tx_hash FK (no block_number on tx_outputs)
-  db.prepare(`
-    DELETE FROM tx_outputs WHERE tx_hash IN (
-      SELECT tx_hash FROM transactions WHERE block_number >= ?
-    )
-  `).run(fromBlock);
-  db.prepare('DELETE FROM events WHERE block_number >= ?').run(fromBlock);
-  db.prepare('DELETE FROM transactions WHERE block_number >= ?').run(fromBlock);
-  db.prepare('DELETE FROM blocks WHERE block_number >= ?').run(fromBlock);
-  db.prepare('DELETE FROM token_deployments WHERE block_number >= ?').run(fromBlock);
+export async function deleteBlockDataFrom(db: DbAdapter, fromBlock: number): Promise<void> {
+  await db.run(
+    `DELETE FROM tx_outputs WHERE tx_hash IN (SELECT tx_hash FROM transactions WHERE block_number >= ?)`,
+    [fromBlock],
+  );
+  await db.run(`DELETE FROM events       WHERE block_number >= ?`, [fromBlock]);
+  await db.run(`DELETE FROM transactions WHERE block_number >= ?`, [fromBlock]);
+  await db.run(`DELETE FROM blocks       WHERE block_number >= ?`, [fromBlock]);
+  await db.run(`DELETE FROM token_deployments WHERE block_number >= ?`, [fromBlock]);
 }
+
+// ---------------------------------------------------------------------------
+// Prepared SQL strings (ANSI — compatible with SQLite 3.24+ and Postgres)
+// ---------------------------------------------------------------------------
+
+const SQL_INSERT_EVENT = `
+  INSERT INTO events
+    (block_number, tx_hash, contract_address, event_name, log_index, event_raw, decoded_json, data_length)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT DO NOTHING
+`;
+
+const SQL_INSERT_TX = `
+  INSERT INTO transactions
+    (tx_hash, block_number, tx_index, tx_type, from_address, contract_address,
+     gas_used, special_gas_used, burned_bitcoin, priority_fee, max_gas_sat,
+     failed, revert_reason, calldata, calldata_length, sender_pub_key_hash)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT DO NOTHING
+`;
+
+const SQL_INSERT_OUTPUT = `
+  INSERT INTO tx_outputs (tx_hash, output_index, value_sat, script_type, address)
+  VALUES (?, ?, ?, ?, ?)
+  ON CONFLICT DO NOTHING
+`;
+
+const SQL_INSERT_DEPLOY = `
+  INSERT INTO token_deployments
+    (block_number, tx_hash, contract_address, deployer, bytecode_hash)
+  VALUES (?, ?, ?, ?, ?)
+  ON CONFLICT DO NOTHING
+`;
 
 // ---------------------------------------------------------------------------
 // Core scanner
@@ -192,7 +231,7 @@ export function deleteBlockDataFrom(db: DatabaseSync, fromBlock: number): void {
  * lock contention and improve throughput.
  */
 export async function scanBlockRange(
-  db: DatabaseSync,
+  db: DbAdapter,
   client: OpnetRpcClient,
   fromBlock: bigint,
   toBlock: bigint,
@@ -205,32 +244,6 @@ export async function scanBlockRange(
   let totalEvents = 0;
   let totalDeployments = 0;
   let totalBlocks = 0;
-
-  const insertEventStmt = db.prepare(`
-    INSERT OR IGNORE INTO events
-      (block_number, tx_hash, contract_address, event_name, log_index, event_raw, decoded_json, data_length)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-  const insertTxStmt = db.prepare(`
-    INSERT OR IGNORE INTO transactions
-      (tx_hash, block_number, tx_index, tx_type, from_address, contract_address,
-       gas_used, special_gas_used, burned_bitcoin, priority_fee, max_gas_sat,
-       failed, revert_reason, calldata, calldata_length, sender_pub_key_hash)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-  const insertOutputStmt = db.prepare(`
-    INSERT OR IGNORE INTO tx_outputs (tx_hash, output_index, value_sat, script_type, address)
-    VALUES (?, ?, ?, ?, ?)
-  `);
-  const insertDeployStmt = db.prepare(`
-    INSERT OR IGNORE INTO token_deployments
-      (block_number, tx_hash, contract_address, deployer, bytecode_hash)
-    VALUES (?, ?, ?, ?, ?)
-  `);
-  const insertBlockStmt = db.prepare(`
-    INSERT OR REPLACE INTO blocks (block_number, block_hash, timestamp, tx_count)
-    VALUES (?, ?, ?, ?)
-  `);
 
   for (let bn = fromBlock; bn <= toBlock; bn++) {
     if (minIntervalMs > 0) {
@@ -272,7 +285,6 @@ export async function scanBlockRange(
         tx.OPNetType === OPNetTransactionTypes.Deployment   ? 'deployment'  :
         'generic';
 
-      // Interaction-specific fields
       let calldata: Buffer | null = null;
       let calldataLength: number | null = null;
       let senderPubKeyHash: string | null = null;
@@ -307,7 +319,6 @@ export async function scanBlockRange(
         senderPubKeyHash,
       });
 
-      // Bitcoin UTXO outputs — every tx type
       for (const output of tx.outputs) {
         const spk = output.scriptPubKey as { type?: string; address?: string; addresses?: string[] };
         outputRows.push({
@@ -349,35 +360,35 @@ export async function scanBlockRange(
       }
     }
 
-    // Single transaction per block: txs + outputs + events + deployments + block metadata
-    db.exec('BEGIN');
+    // Single transaction per block: all writes or none
     try {
-      for (const t of txRows) {
-        insertTxStmt.run(
-          t.txHash, t.blockNumber, t.txIndex, t.txType, t.fromAddress, t.contractAddress,
-          t.gasUsed, t.specialGasUsed, t.burnedBitcoin, t.priorityFee, t.maxGasSat,
-          t.failed, t.revertReason, t.calldata, t.calldataLength, t.senderPubKeyHash,
-        );
-      }
-      for (const o of outputRows) {
-        insertOutputStmt.run(o.txHash, o.outputIndex, o.valueSat !== null ? Number(o.valueSat) : null, o.scriptType, o.address);
-      }
-      for (const e of events) {
-        insertEventStmt.run(
-          e.blockNumber, e.txHash, e.contractAddress, e.eventName, e.logIndex,
-          e.rawData, e.decodedJson ?? null, e.rawData.length,
-        );
-      }
-      for (const d of deployments) {
-        insertDeployStmt.run(
-          d.blockNumber, d.txHash, d.contractAddr, d.deployer, d.bytecodeHash,
-        );
-      }
-      const blockHash = String(block.hash ?? '');
-      insertBlockStmt.run(blockNumber, blockHash || '', blockTimestamp, blockTxs.length);
-      db.exec('COMMIT');
+      await db.transaction(async () => {
+        for (const t of txRows) {
+          await db.run(SQL_INSERT_TX, [
+            t.txHash, t.blockNumber, t.txIndex, t.txType, t.fromAddress, t.contractAddress,
+            t.gasUsed, t.specialGasUsed, t.burnedBitcoin, t.priorityFee, t.maxGasSat,
+            t.failed, t.revertReason, t.calldata, t.calldataLength, t.senderPubKeyHash,
+          ]);
+        }
+        for (const o of outputRows) {
+          await db.run(SQL_INSERT_OUTPUT, [
+            o.txHash, o.outputIndex, o.valueSat !== null ? Number(o.valueSat) : null, o.scriptType, o.address,
+          ]);
+        }
+        for (const e of events) {
+          await db.run(SQL_INSERT_EVENT, [
+            e.blockNumber, e.txHash, e.contractAddress, e.eventName, e.logIndex,
+            e.rawData, e.decodedJson ?? null, e.rawData.length,
+          ]);
+        }
+        for (const d of deployments) {
+          await db.run(SQL_INSERT_DEPLOY, [
+            d.blockNumber, d.txHash, d.contractAddr, d.deployer, d.bytecodeHash,
+          ]);
+        }
+        await db.run(SQL_SAVE_BLOCK, [blockNumber, String(block.hash ?? ''), blockTimestamp, blockTxs.length]);
+      });
     } catch (err) {
-      db.exec('ROLLBACK');
       log('WARN', 'scanner', 'Failed to write block data — skipping', {
         blockNumber,
         error: err instanceof Error ? err.message : String(err),
@@ -424,7 +435,7 @@ export async function scanBlockRange(
     }
   }
 
-  saveCheckpoint(db, toBlock);
+  await saveCheckpoint(db, toBlock);
 
   const elapsedSec = (Date.now() - startTime) / 1000;
   const totalRange = Number(toBlock - fromBlock + 1n);

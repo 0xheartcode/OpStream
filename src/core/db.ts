@@ -1,9 +1,9 @@
 /**
- * SQLite database initializer for OpStream using Node.js built-in node:sqlite.
+ * Database initializer for OpStream.
  *
- * OpStream is a pure Layer 2 chain scanner — it stores raw chain-level data only.
- * Domain-specific tables (pools, reserves, candles, token metadata) belong in
- * Layer 3 (OpKit handler framework).
+ * Returns a DbAdapter — use SqliteAdapter (default, DB_PATH) or
+ * PostgresAdapter (DB_URL). All scanner/indexer code is written against
+ * DbAdapter so it works with either backend.
  *
  * Tables:
  *   blocks             Block metadata (hash, timestamp, tx_count)
@@ -20,6 +20,8 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
+import type { DbAdapter } from './dbAdapter.js';
+import { SqliteAdapter } from './sqliteAdapter.js';
 
 const SCHEMA = `
 PRAGMA journal_mode = WAL;
@@ -138,7 +140,8 @@ CREATE INDEX IF NOT EXISTS idx_error_log_level   ON error_log(level);
 CREATE INDEX IF NOT EXISTS idx_error_log_created ON error_log(created_at);
 `;
 
-let _db: DatabaseSync | null = null;
+let _adapter: DbAdapter | null = null;
+let _rawDb: DatabaseSync | null = null; // SQLite only — exposed for logger (sync writes to error_log)
 
 /**
  * Applies schema migrations for columns added after initial deployment.
@@ -246,38 +249,56 @@ function runMigrations(db: DatabaseSync): void {
   }
 }
 
-export function openDb(path: string): DatabaseSync {
-  if (_db) return _db;
+/**
+ * Open (or return the existing) SQLite database as a DbAdapter.
+ * Creates parent directories as needed.
+ */
+export function openDb(path: string): DbAdapter {
+  if (_adapter) return _adapter;
   const dir = dirname(path);
   if (dir && dir !== '.' && !existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }
-  _db = new DatabaseSync(path);
-  _db.exec('PRAGMA busy_timeout = 5000;');
-  _db.exec(SCHEMA);
-  runMigrations(_db);
-  return _db;
+  const raw = new DatabaseSync(path);
+  raw.exec('PRAGMA busy_timeout = 5000;');
+  raw.exec(SCHEMA);
+  runMigrations(raw);
+  _rawDb = raw;
+  _adapter = new SqliteAdapter(raw);
+  return _adapter;
 }
 
 /**
- * Creates an isolated in-memory SQLite database for unit tests.
+ * Creates an isolated in-memory SQLite DbAdapter for unit tests.
  * Never use in production — data is lost when the process exits.
+ * Access the underlying DatabaseSync via (adapter as SqliteAdapter).rawDb
+ * for direct verification queries in tests.
  */
-export function createTestDb(): DatabaseSync {
-  const db = new DatabaseSync(':memory:');
-  db.exec(SCHEMA);
-  runMigrations(db);
-  return db;
+export function createTestDb(): DbAdapter {
+  const raw = new DatabaseSync(':memory:');
+  raw.exec(SCHEMA);
+  runMigrations(raw);
+  return new SqliteAdapter(raw);
 }
 
-export function getDb(): DatabaseSync {
-  if (!_db) throw new Error('DB not initialized — call openDb() first');
-  return _db;
+export function getDb(): DbAdapter {
+  if (!_adapter) throw new Error('DB not initialized — call openDb() first');
+  return _adapter;
+}
+
+/**
+ * Returns the underlying DatabaseSync when running in SQLite mode.
+ * Used by the logger to persist WARN/ERROR rows synchronously.
+ * Returns null in Postgres mode.
+ */
+export function getRawDb(): DatabaseSync | null {
+  return _rawDb;
 }
 
 export function closeDb(): void {
-  if (_db) {
-    _db.close();
-    _db = null;
+  if (_adapter) {
+    void _adapter.close();
+    _adapter = null;
+    _rawDb = null;
   }
 }

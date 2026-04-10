@@ -16,8 +16,9 @@ export interface OpStreamConfig {
   logLevel: string;
   logFormat: string;
 
-  // Database
+  // Database — set DB_URL for Postgres, DB_PATH for SQLite (default)
   dbPath: string;
+  dbUrl: string | null;
 
   // Bootstrap scanner
   bootstrapRps: number;
@@ -50,6 +51,7 @@ export function loadConfig(): OpStreamConfig {
     logLevel:          process.env['LOG_LEVEL']           ?? 'INFO',
     logFormat:         process.env['LOG_FORMAT']          ?? 'human',
     dbPath:            process.env['DB_PATH']             ?? 'data/opstream.db',
+    dbUrl:             process.env['DB_URL']              ?? null,
     bootstrapRps:        parseInt10(process.env['BOOTSTRAP_RPS'], 10),
     bootstrapChunkSize:  parseInt10(process.env['BOOTSTRAP_CHUNK_SIZE'], 500),
     bootstrapFromBlock:  parseBigInt(process.env['BOOTSTRAP_FROM_BLOCK'], 941400n),

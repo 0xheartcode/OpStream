@@ -6,6 +6,10 @@
  *   start      Bootstrap + live (catch up, then follow chain tip)
  *   bootstrap  Full scan from BOOTSTRAP_FROM_BLOCK (exits when done)
  *   live       Follow chain tip only (assumes already caught up)
+ *
+ * Database:
+ *   DB_URL set  → Postgres (e.g. postgres://user:pass@host:5432/opstream)
+ *   DB_URL unset → SQLite at DB_PATH (default: data/opstream.db)
  */
 
 import 'dotenv/config';
@@ -20,9 +24,14 @@ Commands:
   bootstrap  Full scan from BOOTSTRAP_FROM_BLOCK (exits when done)
   live       Follow chain tip only (assumes already caught up)
 
+Database:
+  DB_URL     Postgres connection URL (e.g. postgres://user:pass@host:5432/opstream)
+             If unset, SQLite is used (DB_PATH).
+
 Environment:
   OPNET_RPC_URL          OPNET JSON-RPC endpoint (default: https://mainnet.opnet.org)
   DB_PATH                SQLite database file (default: data/opstream.db)
+  DB_URL                 Postgres connection URL (overrides DB_PATH when set)
   BOOTSTRAP_FROM_BLOCK   Starting block (default: 941400)
   BOOTSTRAP_RPS          Rate limit: requests per second (default: 10)
   BOOTSTRAP_CHUNK_SIZE   Blocks per chunk (default: 500)
@@ -30,6 +39,24 @@ Environment:
   WEBHOOK_URLS           Comma-separated HTTP callback URLs (default: none)
   LOG_LEVEL              DEBUG | INFO | WARN | ERROR (default: INFO)
 `.trim();
+
+async function openAdapter() {
+  const { loadConfig } = await import('./core/config.js');
+  const config = loadConfig();
+
+  if (config.dbUrl) {
+    const { openPostgresDb } = await import('./core/postgresAdapter.js');
+    const { log } = await import('./core/logger.js');
+    log('INFO', 'main', 'Using Postgres database', { url: config.dbUrl.replace(/:\/\/[^@]+@/, '://***@') });
+    return openPostgresDb(config.dbUrl);
+  } else {
+    const { openDb, getRawDb } = await import('./core/db.js');
+    const { setLogDb } = await import('./core/logger.js');
+    const adapter = openDb(config.dbPath);
+    setLogDb(getRawDb());
+    return adapter;
+  }
+}
 
 async function main(): Promise<void> {
   const command = process.argv[2];
@@ -47,10 +74,8 @@ async function main(): Promise<void> {
     }
 
     case 'start': {
-      // Bootstrap to catch up, then switch to live indexing
       const { runBootstrap } = await import('./indexer/bootstrap.js');
       const { loadConfig } = await import('./core/config.js');
-      const { openDb } = await import('./core/db.js');
       const { OpnetRpcClient } = await import('./rpc/opnetRpc.js');
       const { runLiveIndexer } = await import('./indexer/liveIndexer.js');
       const { getWebhookManager } = await import('./indexer/webhooks.js');
@@ -59,7 +84,7 @@ async function main(): Promise<void> {
       await runBootstrap();
 
       const config = loadConfig();
-      const db = openDb(config.dbPath);
+      const db = await openAdapter();
       const client = new OpnetRpcClient(config.opnetRpcUrl);
       const webhooks = getWebhookManager();
 
@@ -77,14 +102,13 @@ async function main(): Promise<void> {
 
     case 'live': {
       const { loadConfig } = await import('./core/config.js');
-      const { openDb } = await import('./core/db.js');
       const { OpnetRpcClient } = await import('./rpc/opnetRpc.js');
       const { runLiveIndexer } = await import('./indexer/liveIndexer.js');
       const { getWebhookManager } = await import('./indexer/webhooks.js');
       const { log } = await import('./core/logger.js');
 
       const config = loadConfig();
-      const db = openDb(config.dbPath);
+      const db = await openAdapter();
       const client = new OpnetRpcClient(config.opnetRpcUrl);
       const webhooks = getWebhookManager();
 

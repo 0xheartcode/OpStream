@@ -20,7 +20,8 @@
     "@btc-vision/transaction": "^1.8.6",
     "@opnet-devs/opkit": "file:../OpKit",
     "dotenv": "^16.4.5",
-    "opnet": "^1.8.13"
+    "opnet": "^1.8.13",
+    "postgres": "^3.4.5"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

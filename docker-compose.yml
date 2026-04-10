@@ -1,0 +1,68 @@
+# OpStream — Docker Compose
+#
+# Build context is the Opnet-devs/ parent so the local OpKit dep resolves.
+# Run from the OpStream/ directory:
+#
+#   SQLite (default):
+#     docker compose up -d
+#
+#   Postgres (bundled):
+#     docker compose --profile postgres up -d
+#
+#   Postgres (external — set DB_URL in .env):
+#     docker compose up -d           (no postgres profile needed)
+
+services:
+  opstream:
+    build:
+      context: ..
+      dockerfile: OpStream/Dockerfile
+    image: opstream:latest
+    container_name: opstream
+    restart: unless-stopped
+    env_file: .env
+
+    volumes:
+      # SQLite database — persists on host, survives container rebuilds
+      # (ignored when DB_URL is set in .env)
+      - ./data:/app/data
+      # Logs accessible from host
+      - ./logs:/app/logs
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+
+    # Uncomment if you enable WS_PORT in .env:
+    # ports:
+    #   - "${WS_PORT:-8080}:8080"
+
+    # Healthcheck: SQLite file exists OR we've been running > 60s (Postgres path)
+    healthcheck:
+      test: ["CMD", "sh", "-c", "test -f /app/data/opstream.db || test $$(( $(date +%s) - $START_TIME )) -gt 60"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  # ── Bundled Postgres (optional — activate with --profile postgres) ──────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: opstream-postgres
+    profiles: [postgres]
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       opstream
+      POSTGRES_USER:     opstream
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-opstream_secret}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U opstream -d opstream"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:

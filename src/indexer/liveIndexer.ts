@@ -11,9 +11,9 @@
  *   - Tracks `blocksIndexedLive` and `eventsIndexedLive` in the metrics store
  */
 
-import type { DatabaseSync } from 'node:sqlite';
 import { log } from '../core/logger.js';
 import { metrics } from '../core/metrics.js';
+import type { DbAdapter } from '../core/dbAdapter.js';
 import type { OpnetRpcClient } from '../rpc/opnetRpc.js';
 import {
   scanBlockRange,
@@ -29,7 +29,7 @@ import type { ScanResult, OnEventCallback } from './scanner.js';
 // ---------------------------------------------------------------------------
 
 export type ScanBlocksFn = (
-  db: DatabaseSync,
+  db: DbAdapter,
   client: OpnetRpcClient,
   fromBlock: bigint,
   toBlock: bigint,
@@ -73,7 +73,7 @@ const MAX_REORG_DEPTH = 10;
  * Returns the fork point block number if a reorg is detected, null otherwise.
  */
 async function checkForReorg(
-  db: DatabaseSync,
+  db: DbAdapter,
   client: OpnetRpcClient,
   lastIndexedBlock: number,
 ): Promise<number | null> {
@@ -81,7 +81,7 @@ async function checkForReorg(
     const checkBlock = lastIndexedBlock - depth;
     if (checkBlock <= 0) return null;
 
-    const storedHash = getBlockHash(db, checkBlock);
+    const storedHash = await getBlockHash(db, checkBlock);
     if (!storedHash) return null; // no hash stored, can't detect
 
     try {
@@ -131,7 +131,7 @@ async function checkForReorg(
  * via setTimeout — the caller must keep the process alive (event loop).
  */
 export function startLiveIndexer(
-  db: DatabaseSync,
+  db: DbAdapter,
   client: OpnetRpcClient,
   opts?: LiveIndexerOptions,
 ): LiveIndexerHandle {
@@ -142,7 +142,7 @@ export function startLiveIndexer(
 
   let running = true;
   let lastPollAt = 0;
-  let lastIndexedBlock = Number(getCheckpoint(db));
+  let lastIndexedBlock = 0; // updated on first poll from getCheckpoint()
   let timer: ReturnType<typeof setTimeout> | null = null;
 
   let _resolveStop: (() => void) | null = null;
@@ -152,7 +152,8 @@ export function startLiveIndexer(
     lastPollAt = Date.now();
 
     try {
-      const checkpoint = getCheckpoint(db);
+      const checkpoint = await getCheckpoint(db);
+      lastIndexedBlock = Number(checkpoint);
       const currentBlock = await client.getBlockNumber();
 
       // Check for reorgs before scanning new blocks
@@ -163,8 +164,8 @@ export function startLiveIndexer(
             forkPoint,
             lastIndexedBlock: Number(checkpoint),
           });
-          deleteBlockDataFrom(db, forkPoint);
-          saveCheckpoint(db, BigInt(forkPoint - 1));
+          await deleteBlockDataFrom(db, forkPoint);
+          await saveCheckpoint(db, BigInt(forkPoint - 1));
           lastIndexedBlock = forkPoint - 1;
           // Re-scan from fork point on next poll
           return;
@@ -244,7 +245,7 @@ export function startLiveIndexer(
  * Blocking wrapper around startLiveIndexer — resolves only when stop() is called.
  */
 export async function runLiveIndexer(
-  db: DatabaseSync,
+  db: DbAdapter,
   client: OpnetRpcClient,
   opts?: LiveIndexerOptions,
   onHandle?: (handle: LiveIndexerHandle) => void,

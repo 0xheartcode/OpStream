@@ -6,10 +6,10 @@
  * OP20 labeling — that belongs in OpKit.
  */
 
-import { DatabaseSync } from 'node:sqlite';
 import { log } from '../core/logger.js';
 import { loadConfig } from '../core/config.js';
 import { openDb } from '../core/db.js';
+import type { DbAdapter } from '../core/dbAdapter.js';
 import { OpnetRpcClient } from '../rpc/opnetRpc.js';
 import { scanBlockRange, getCheckpoint, progressBar, humanElapsed } from './scanner.js';
 
@@ -43,13 +43,14 @@ export interface TokenDeploymentRow {
   created_at: number;
 }
 
-export function queryTokenDeployments(
-  db: DatabaseSync,
+export async function queryTokenDeployments(
+  db: DbAdapter,
   sinceBlock: number,
-): TokenDeploymentRow[] {
-  return db.prepare(
+): Promise<TokenDeploymentRow[]> {
+  return db.all<TokenDeploymentRow>(
     `SELECT * FROM token_deployments WHERE block_number >= ? ORDER BY block_number ASC`,
-  ).all(sinceBlock) as unknown as TokenDeploymentRow[];
+    [sinceBlock],
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -117,7 +118,7 @@ function createProgressDisplay(startBlock: number, totalBlocks: number) {
  * Scans blocks in chunks and stores all chain data.
  */
 export async function runBootstrapCore(
-  db: DatabaseSync,
+  db: DbAdapter,
   client: OpnetRpcClient,
   opts?: BootstrapOptions,
   bootstrapRps?: number,
@@ -129,7 +130,7 @@ export async function runBootstrapCore(
 
   const currentBlock = await client.getBlockNumber();
 
-  const checkpoint = getCheckpoint(db);
+  const checkpoint = await getCheckpoint(db);
   const startBlock = fromBlockOverride > 0n ? fromBlockOverride : checkpoint + 1n;
 
   const totalRange = Number(currentBlock - startBlock + 1n);

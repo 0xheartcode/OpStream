@@ -3,11 +3,12 @@
  *
  * Stores ALL events from every interaction TX — unknown events preserved
  * raw (decoded_json = NULL) until an ABI decoder is registered.
- * UNIQUE(block_number, tx_hash, contract_address, event_name) ensures
- * idempotent re-scans via INSERT OR IGNORE.
+ * ON CONFLICT DO NOTHING ensures idempotent re-scans.
+ *
+ * All SQL uses ANSI ON CONFLICT syntax (compatible with SQLite 3.24+ and Postgres).
  */
 
-import type { DatabaseSync } from 'node:sqlite';
+import type { DbAdapter } from '../core/dbAdapter.js';
 
 export interface EventRow {
   id: number;
@@ -38,24 +39,25 @@ export interface EventQuery {
 }
 
 const INSERT_SQL = `
-  INSERT OR IGNORE INTO events
+  INSERT INTO events
     (block_number, tx_hash, contract_address, event_name, event_raw, decoded_json, data_length)
   VALUES (?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT DO NOTHING
 `;
 
 /**
  * Insert a single event. Silently ignores duplicates (UNIQUE constraint).
  */
-export function insertEvent(
-  db: DatabaseSync,
+export async function insertEvent(
+  db: DbAdapter,
   blockNumber: number,
   txHash: string,
   contractAddress: string,
   eventName: string,
   rawData: Buffer,
   decodedJson?: string | null,
-): void {
-  db.prepare(INSERT_SQL).run(
+): Promise<void> {
+  await db.run(INSERT_SQL, [
     blockNumber,
     txHash,
     contractAddress,
@@ -63,21 +65,18 @@ export function insertEvent(
     rawData,
     decodedJson ?? null,
     rawData.length,
-  );
+  ]);
 }
 
 /**
- * Batch insert events using a prepared statement inside a transaction.
+ * Batch insert events inside a single transaction.
  */
-export function insertEventsBatch(db: DatabaseSync, events: EventInput[]): void {
+export async function insertEventsBatch(db: DbAdapter, events: EventInput[]): Promise<void> {
   if (events.length === 0) return;
 
-  const stmt = db.prepare(INSERT_SQL);
-
-  db.exec('BEGIN');
-  try {
+  await db.transaction(async () => {
     for (const e of events) {
-      stmt.run(
+      await db.run(INSERT_SQL, [
         e.blockNumber,
         e.txHash,
         e.contractAddress,
@@ -85,19 +84,15 @@ export function insertEventsBatch(db: DatabaseSync, events: EventInput[]): void 
         e.rawData,
         e.decodedJson ?? null,
         e.rawData.length,
-      );
+      ]);
     }
-    db.exec('COMMIT');
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
-  }
+  });
 }
 
 /**
  * Query events with optional filters. All filters are ANDed.
  */
-export function queryEvents(db: DatabaseSync, filters: EventQuery): EventRow[] {
+export async function queryEvents(db: DbAdapter, filters: EventQuery): Promise<EventRow[]> {
   const clauses: string[] = [];
   const params: unknown[] = [];
 
@@ -121,7 +116,7 @@ export function queryEvents(db: DatabaseSync, filters: EventQuery): EventRow[] {
   const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
   const sql = `SELECT * FROM events ${where} ORDER BY block_number, id`;
 
-  return db.prepare(sql).all(...(params as import('node:sqlite').SQLInputValue[])) as unknown as EventRow[];
+  return db.all<EventRow>(sql, params);
 }
 
 /**
@@ -129,39 +124,34 @@ export function queryEvents(db: DatabaseSync, filters: EventQuery): EventRow[] {
  * Calls decoderFn on each matching row's event_raw and updates decoded_json.
  * Returns the number of rows updated.
  */
-export function backfillDecoded(
-  db: DatabaseSync,
+export async function backfillDecoded(
+  db: DbAdapter,
   contractAddress: string,
   eventName: string,
   decoderFn: (rawData: Buffer) => Record<string, unknown> | null,
-): number {
-  const rows = db
-    .prepare(
-      `SELECT id, event_raw FROM events
-       WHERE contract_address = ? AND event_name = ? AND decoded_json IS NULL`,
-    )
-    .all(contractAddress, eventName) as Array<{ id: number; event_raw: Buffer }>;
+): Promise<number> {
+  const rows = await db.all<{ id: number; event_raw: Buffer }>(
+    `SELECT id, event_raw FROM events
+     WHERE contract_address = ? AND event_name = ? AND decoded_json IS NULL`,
+    [contractAddress, eventName],
+  );
 
   if (rows.length === 0) return 0;
 
-  const updateStmt = db.prepare('UPDATE events SET decoded_json = ? WHERE id = ?');
   let updated = 0;
 
-  db.exec('BEGIN');
-  try {
+  await db.transaction(async () => {
     for (const row of rows) {
       const decoded = decoderFn(row.event_raw);
       if (decoded !== null) {
-        updateStmt.run(JSON.stringify(decoded), row.id);
+        await db.run('UPDATE events SET decoded_json = ? WHERE id = ?', [
+          JSON.stringify(decoded),
+          row.id,
+        ]);
         updated++;
       }
     }
-    db.exec('COMMIT');
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
-  }
+  });
 
   return updated;
 }
-

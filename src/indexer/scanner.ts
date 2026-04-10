@@ -10,15 +10,14 @@
 
 import { createHash } from 'node:crypto';
 import {
-  InteractionTransaction,
-  DeploymentTransaction,
+  type InteractionTransaction,
+  type DeploymentTransaction,
   OPNetTransactionTypes,
-  TransactionBase,
+  type TransactionBase,
 } from 'opnet';
 import { log } from '../core/logger.js';
 import type { DbAdapter } from '../core/dbAdapter.js';
 import type { EventInput } from './eventStore.js';
-import { decodeEvent } from '@opnet-devs/opkit';
 import type { OpnetRpcClient } from '../rpc/opnetRpc.js';
 
 // ---------------------------------------------------------------------------
@@ -64,18 +63,39 @@ export interface ScanResult {
 
 /** Callback invoked for each event as it's indexed. Used for WebSocket broadcast. */
 export type OnEventCallback = (event: {
-  blockNumber: number;
-  txHash: string;
+  blockNumber:     number;
+  txHash:          string;
   contractAddress: string;
-  eventName: string;
-  decodedJson: string | null;
+  eventName:       string;
+  decodedJson:     string | null;
+  logIndex:        number;
+  blockTimestamp:  number;
+  txIndex:         number;
+  fromAddress:     string | null;
+  gasUsed:         string | null;
+  burnedBitcoin:   string | null;
+  failed:          boolean;
+  revertReason:    string | null;
+  eventRaw:        string;
 }) => void;
+
+/**
+ * Optional ABI decoder injected by the caller.
+ * Returns a plain object on success, null if the event type is unknown.
+ * When omitted, decodedJson is always stored as null.
+ */
+export type EventDecoder = (eventType: string, data: Buffer) => Record<string, unknown> | null;
 
 export interface ScanOptions {
   /** Minimum milliseconds between RPC calls (rate limiting). */
   minIntervalMs?: number;
   /** Called for each event after it's stored. */
   onEvent?: OnEventCallback;
+  /**
+   * ABI decoder for event payloads. Populate decodedJson in the DB.
+   * OpKit consumers pass their decodeEvent here; standalone OpStream leaves it unset.
+   */
+  decode?: EventDecoder;
   /**
    * Called every ~10 blocks with (doneInChunk, chunkProgressLine).
    * When provided, scanner skips its own log() for progress — the caller
@@ -239,6 +259,7 @@ export async function scanBlockRange(
 ): Promise<ScanResult> {
   const minIntervalMs = opts?.minIntervalMs ?? 0;
   const onEvent = opts?.onEvent;
+  const decode = opts?.decode ?? null;
   const startTime = Date.now();
   let lastCallTime = 0;
   let totalEvents = 0;
@@ -267,8 +288,17 @@ export async function scanBlockRange(
     if (!block) continue;
 
     const blockNumber = Number(block.height);
-    const blockTimestamp: number | null = (block as any).time ?? (block as any).timestamp ?? null;
-    const events: (EventInput & { logIndex: number })[] = [];
+    const blockTimestamp = block.time;
+    const events: (EventInput & {
+      logIndex:       number;
+      blockTimestamp: number;
+      txIndex:        number;
+      fromAddress:    string | null;
+      gasUsed:        string | null;
+      burnedBitcoin:  string | null;
+      failed:         boolean;
+      revertReason:   string | null;
+    })[] = [];
     const txRows: TxRow[] = [];
     const deployments: Array<{ blockNumber: number; txHash: string; contractAddr: string; deployer: string; bytecodeHash: string }> = [];
 
@@ -278,8 +308,11 @@ export async function scanBlockRange(
     for (let txIndex = 0; txIndex < blockTxs.length; txIndex++) {
       const tx = blockTxs[txIndex]!;
 
-      const fromAddress = String((tx as any).from ?? '') || null;
-      const contractAddr = String((tx as any).contractAddress ?? '') || null;
+      const txAsInteraction = tx as InteractionTransaction;
+      const fromAddress  = txAsInteraction.from          ? String(txAsInteraction.from) : null;
+      const contractAddr = txAsInteraction.contractAddress ?? null;
+      const gasUsedStr       = tx.gasUsed       != null ? String(tx.gasUsed)       : null;
+      const burnedBitcoinStr = tx.burnedBitcoin != null ? String(tx.burnedBitcoin) : null;
       const txType =
         tx.OPNetType === OPNetTransactionTypes.Interaction ? 'interaction' :
         tx.OPNetType === OPNetTransactionTypes.Deployment   ? 'deployment'  :
@@ -307,13 +340,13 @@ export async function scanBlockRange(
         txType,
         fromAddress,
         contractAddress: contractAddr,
-        gasUsed:         tx.gasUsed        != null ? String(tx.gasUsed)        : null,
+        gasUsed:         gasUsedStr,
         specialGasUsed:  tx.specialGasUsed != null ? String(tx.specialGasUsed) : null,
-        burnedBitcoin:   tx.burnedBitcoin  != null ? String(tx.burnedBitcoin)  : null,
+        burnedBitcoin:   burnedBitcoinStr,
         priorityFee:     tx.priorityFee    != null ? String(tx.priorityFee)    : null,
         maxGasSat:       tx.maxGasSat      != null ? String(tx.maxGasSat)      : null,
-        failed:          (tx as any).failed ? 1 : 0,
-        revertReason:    (tx as any).revert ?? null,
+        failed:          tx.failed ? 1 : 0,
+        revertReason:    tx.revert ?? null,
         calldata,
         calldataLength,
         senderPubKeyHash,
@@ -337,15 +370,22 @@ export async function scanBlockRange(
         for (const [evContractAddr, evts] of Object.entries(tx.events)) {
           for (const event of evts) {
             const rawData = Buffer.from(event.data);
-            const decoded = decodeEvent(event.type, rawData);
+            const decoded = decode ? decode(event.type, rawData) : null;
             events.push({
               blockNumber,
-              txHash: itx.id,
+              txHash:         itx.id,
               contractAddress: evContractAddr,
-              eventName: event.type,
-              logIndex: logIndex++,
+              eventName:      event.type,
+              logIndex:       logIndex++,
               rawData,
-              decodedJson: decoded ? JSON.stringify(decoded) : null,
+              decodedJson:    decoded ? JSON.stringify(decoded) : null,
+              blockTimestamp,
+              txIndex,
+              fromAddress,
+              gasUsed:        gasUsedStr,
+              burnedBitcoin:  burnedBitcoinStr,
+              failed:         tx.failed,
+              revertReason:   tx.revert ?? null,
             });
           }
         }
@@ -400,11 +440,20 @@ export async function scanBlockRange(
     if (onEvent) {
       for (const e of events) {
         onEvent({
-          blockNumber: e.blockNumber,
-          txHash: e.txHash,
+          blockNumber:     e.blockNumber,
+          txHash:          e.txHash,
           contractAddress: e.contractAddress,
-          eventName: e.eventName,
-          decodedJson: e.decodedJson ?? null,
+          eventName:       e.eventName,
+          decodedJson:     e.decodedJson ?? null,
+          logIndex:        e.logIndex,
+          blockTimestamp:  e.blockTimestamp,
+          txIndex:         e.txIndex,
+          fromAddress:     e.fromAddress,
+          gasUsed:         e.gasUsed,
+          burnedBitcoin:   e.burnedBitcoin,
+          failed:          e.failed,
+          revertReason:    e.revertReason,
+          eventRaw:        '0x' + e.rawData.toString('hex'),
         });
       }
     }

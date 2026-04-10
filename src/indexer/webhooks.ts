@@ -50,11 +50,23 @@ export interface EventPattern {
 
 /** Normalized on-chain event for webhook delivery. */
 export interface WebhookEvent {
-  blockNumber: number;
-  txHash: string;
+  // Core identity fields (always present):
+  blockNumber:     number;
+  txHash:          string;
   contractAddress: string;
-  eventName: string;
-  decodedJson: string | null;
+  eventName:       string;
+  decodedJson:     string | null;
+
+  // Enriched fields (optional — added for WebSocket / OpKit Tier-2 consumers):
+  logIndex?:       number;              // position of this event within its transaction
+  blockTimestamp?: number;              // unix timestamp of the containing block
+  txIndex?:        number;              // position of the transaction within the block
+  fromAddress?:    string | null;       // address that submitted the transaction
+  gasUsed?:        string | null;       // satoshi units, serialised as decimal string
+  burnedBitcoin?:  string | null;       // satoshi units, serialised as decimal string
+  failed?:         boolean;             // true when the transaction reverted
+  revertReason?:   string | null;       // revert message, if any
+  eventRaw?:       string;              // hex-encoded raw event bytes, e.g. "0x1a2b3c…"
 }
 
 /** A registered subscription. */

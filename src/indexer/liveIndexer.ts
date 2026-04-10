@@ -88,7 +88,7 @@ async function checkForReorg(
       const block = await client.getBlock(BigInt(checkBlock));
       if (!block) return null;
 
-      const onChainHash = String((block as any).hash ?? (block as any).id ?? '');
+      const onChainHash = block.hash ?? '';
       if (!onChainHash) return null;
 
       if (storedHash !== onChainHash) {

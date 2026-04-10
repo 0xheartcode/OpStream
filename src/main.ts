@@ -44,16 +44,18 @@ async function openAdapter() {
   const { loadConfig } = await import('./core/config.js');
   const config = loadConfig();
 
+  const { setLogAdapter, log } = await import('./core/logger.js');
+
   if (config.dbUrl) {
     const { openPostgresDb } = await import('./core/postgresAdapter.js');
-    const { log } = await import('./core/logger.js');
     log('INFO', 'main', 'Using Postgres database', { url: config.dbUrl.replace(/:\/\/[^@]+@/, '://***@') });
-    return openPostgresDb(config.dbUrl);
+    const adapter = await openPostgresDb(config.dbUrl);
+    setLogAdapter(adapter);
+    return adapter;
   } else {
-    const { openDb, getRawDb } = await import('./core/db.js');
-    const { setLogDb } = await import('./core/logger.js');
+    const { openDb } = await import('./core/db.js');
     const adapter = openDb(config.dbPath);
-    setLogDb(getRawDb());
+    setLogAdapter(adapter);
     return adapter;
   }
 }

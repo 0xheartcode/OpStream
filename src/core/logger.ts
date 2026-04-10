@@ -17,6 +17,7 @@
  */
 
 import type { DatabaseSync } from 'node:sqlite';
+import type { DbAdapter } from './dbAdapter.js';
 
 export type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
 
@@ -29,19 +30,64 @@ const LEVEL_ORDER: Record<LogLevel, number> = {
 
 // ── Persistent error log ──────────────────────────────────────────────────────
 
-let _logDb: DatabaseSync | null = null;
+/**
+ * Write-behind queue for async DB backends (Postgres).
+ * log() stays synchronous — entries are queued and flushed on the next
+ * event loop tick via setImmediate. Never throws; DB errors are silently swallowed.
+ */
+type LogEntry = [ts: string, level: string, component: string, message: string, dataJson: string | null];
+
+let _logAdapter: DbAdapter | null = null;
+let _logDb: DatabaseSync | null = null;      // SQLite fast path (kept for pruneErrorLog / queryRecentErrors)
+const _logQueue: LogEntry[] = [];
+let _flushScheduled = false;
+
+function scheduleFlush(): void {
+  if (_flushScheduled || !_logAdapter) return;
+  _flushScheduled = true;
+  setImmediate(() => {
+    _flushScheduled = false;
+    if (!_logAdapter || _logQueue.length === 0) return;
+    const batch = _logQueue.splice(0);
+    void _logAdapter.transaction(async () => {
+      for (const [ts, level, component, message, dataJson] of batch) {
+        await _logAdapter!.run(
+          'INSERT INTO error_log (timestamp, level, component, message, data_json) VALUES (?, ?, ?, ?, ?)',
+          [ts, level, component, message, dataJson],
+        );
+      }
+    }).catch(() => { /* never let DB errors crash the logger */ });
+  });
+}
 
 /**
- * Bind a SQLite DB for persistent error/warning logging.
- * Call after openDb(); pass null to detach.
+ * Bind a DbAdapter for persistent error/warning logging.
+ * Works with both SQLite and Postgres backends.
+ * Call after openDb() / openPostgresDb(); pass null to detach.
+ */
+export function setLogAdapter(adapter: DbAdapter | null): void {
+  _logAdapter = adapter;
+  // Also set _logDb for the synchronous helpers when it's a SQLite adapter
+  if (adapter && 'rawDb' in adapter) {
+    _logDb = (adapter as { rawDb: DatabaseSync }).rawDb;
+  } else {
+    _logDb = null;
+  }
+}
+
+/**
+ * @deprecated Use setLogAdapter(adapter) instead.
+ * Kept for backward compatibility — wraps DatabaseSync directly.
  */
 export function setLogDb(db: DatabaseSync | null): void {
   _logDb = db;
+  // Detach the adapter too so we don't double-write
+  _logAdapter = null;
 }
 
 /**
  * Delete error_log rows older than `olderThanDays` days.
- * Safe to call at startup — no-ops when the table is empty.
+ * Requires SQLite backend (synchronous). No-op when Postgres is in use.
  */
 export function pruneErrorLog(db: DatabaseSync, olderThanDays = 30): void {
   const cutoff = Math.floor(Date.now() / 1000) - olderThanDays * 86_400;
@@ -50,6 +96,7 @@ export function pruneErrorLog(db: DatabaseSync, olderThanDays = 30): void {
 
 /**
  * Read recent error_log rows, newest first.
+ * Requires SQLite backend (synchronous). Returns [] when Postgres is in use.
  */
 export function queryRecentErrors(
   db: DatabaseSync,
@@ -108,14 +155,22 @@ export function log(
     }
   }
 
-  // Persist WARN/ERROR to error_log table when a DB is bound
-  if (_logDb && (level === 'WARN' || level === 'ERROR')) {
-    try {
-      _logDb.prepare(
-        'INSERT INTO error_log (timestamp, level, component, message, data_json) VALUES (?, ?, ?, ?, ?)',
-      ).run(ts, level, component, message, data ? JSON.stringify(data) : null);
-    } catch {
-      // Never let DB errors crash the logger
+  // Persist WARN/ERROR to error_log table
+  if (level === 'WARN' || level === 'ERROR') {
+    const dataJson = data ? JSON.stringify(data) : null;
+    if (_logAdapter) {
+      // Async backend (Postgres or SQLite via adapter) — write-behind queue
+      _logQueue.push([ts, level, component, message, dataJson]);
+      scheduleFlush();
+    } else if (_logDb) {
+      // SQLite fast path — synchronous, zero overhead
+      try {
+        _logDb.prepare(
+          'INSERT INTO error_log (timestamp, level, component, message, data_json) VALUES (?, ?, ?, ?, ?)',
+        ).run(ts, level, component, message, dataJson);
+      } catch {
+        // Never let DB errors crash the logger
+      }
     }
   }
 }

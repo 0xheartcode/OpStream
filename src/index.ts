@@ -10,7 +10,7 @@ export { openDb, createTestDb, getDb, getRawDb, closeDb } from './core/db.js';
 export type { DbAdapter } from './core/dbAdapter.js';
 export { SqliteAdapter } from './core/sqliteAdapter.js';
 export { PostgresAdapter, openPostgresDb } from './core/postgresAdapter.js';
-export { log, debug, info, warn, error, setLogDb, pruneErrorLog, queryRecentErrors, refreshLogConfig } from './core/logger.js';
+export { log, debug, info, warn, error, setLogAdapter, setLogDb, pruneErrorLog, queryRecentErrors, refreshLogConfig } from './core/logger.js';
 export type { LogLevel } from './core/logger.js';
 export { metrics, METRIC_KEYS } from './core/metrics.js';
 export type { MetricKey, MetricsSnapshot } from './core/metrics.js';

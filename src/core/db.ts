@@ -138,6 +138,19 @@ CREATE TABLE IF NOT EXISTS error_log (
 
 CREATE INDEX IF NOT EXISTS idx_error_log_level   ON error_log(level);
 CREATE INDEX IF NOT EXISTS idx_error_log_created ON error_log(created_at);
+
+CREATE TABLE IF NOT EXISTS mempool_pending (
+  txid             TEXT NOT NULL PRIMARY KEY,
+  raw_payload_hex  TEXT NOT NULL,
+  contract_selector TEXT,
+  decoded_json     TEXT,
+  first_seen_at    INTEGER NOT NULL DEFAULT (unixepoch()),
+  confirmed_at     INTEGER,
+  pruned_at        INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_mempool_pending_first_seen ON mempool_pending(first_seen_at);
+CREATE INDEX IF NOT EXISTS idx_mempool_pending_confirmed  ON mempool_pending(confirmed_at);
 `;
 
 let _adapter: DbAdapter | null = null;
@@ -240,6 +253,25 @@ function runMigrations(db: Database.Database): void {
         db.exec(`INSERT OR IGNORE INTO blocks (block_number, block_hash) SELECT block_number, block_hash FROM block_hashes`);
         db.exec(`DROP TABLE block_hashes`);
       }
+    }
+    // mempool_pending table — pending OPNET transactions from the Bitcoin mempool
+    const mempoolTables = db.prepare(
+      `SELECT name FROM sqlite_master WHERE type='table' AND name='mempool_pending'`,
+    ).all() as Array<{ name: string }>;
+    if (mempoolTables.length === 0) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS mempool_pending (
+          txid             TEXT NOT NULL PRIMARY KEY,
+          raw_payload_hex  TEXT NOT NULL,
+          contract_selector TEXT,
+          decoded_json     TEXT,
+          first_seen_at    INTEGER NOT NULL DEFAULT (unixepoch()),
+          confirmed_at     INTEGER,
+          pruned_at        INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_mempool_pending_first_seen ON mempool_pending(first_seen_at);
+        CREATE INDEX IF NOT EXISTS idx_mempool_pending_confirmed  ON mempool_pending(confirmed_at);
+      `);
     }
   } catch (err) {
     throw new Error(

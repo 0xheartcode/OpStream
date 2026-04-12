@@ -193,7 +193,7 @@ export function startLiveIndexer(
         metrics.increment('eventsIndexedLive', result.eventsStored);
         lastIndexedBlock = Number(toBlock);
 
-        log('INFO', 'live', `Indexed  block=${Number(toBlock)}  events=${result.eventsStored}  deploys=${result.deploymentsFound}`);
+        log('INFO', 'live', `Indexed  block=${Number(toBlock)}  events=${result.eventsStored}  transactions=${result.transactionsStored}`);
       }
     } catch (err) {
       log('WARN', 'liveIndexer', 'Live indexer poll failed', {

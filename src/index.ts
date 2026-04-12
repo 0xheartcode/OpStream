@@ -5,7 +5,7 @@
 
 // Core
 export { loadConfig, validateConfig } from './core/config.js';
-export type { OpStreamConfig } from './core/config.js';
+export type { OpStreamConfig, OpStreamMode } from './core/config.js';
 export { openDb, createTestDb, getDb, getRawDb, closeDb } from './core/db.js';
 export type { DbAdapter } from './core/dbAdapter.js';
 export { SqliteAdapter } from './core/sqliteAdapter.js';
@@ -48,3 +48,15 @@ export type { LiveIndexerOptions, LiveIndexerHealth, LiveIndexerHandle, ScanBloc
 // Webhooks (raw event subscriptions — arguably L2)
 export { SubscriptionManager, loadEnvWebhooks, getWebhookManager, resetWebhookManager } from './indexer/webhooks.js';
 export type { EventPattern, WebhookEvent, Subscription } from './indexer/webhooks.js';
+
+// JSON-RPC 2.0 server
+export { startRpcServer, stopRpcServer, getRpcServer, createRpcHandler } from './rpc/rpcServer.js';
+export type { RpcLogExtended, RpcTransaction, RpcBlockReceipts } from './rpc/rpcServer.js';
+
+// Bitcoin tx parser
+export { extractOpnetPayload } from './rpc/btcTxParser.js';
+export type { OpnetPayload } from './rpc/btcTxParser.js';
+
+// Mempool poller
+export { startMempoolPoller, runMempoolPoller } from './indexer/mempoolPoller.js';
+export type { MempoolPollerOptions, MempoolPollerHealth, MempoolPollerHandle } from './indexer/mempoolPoller.js';

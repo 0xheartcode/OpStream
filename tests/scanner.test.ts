@@ -287,6 +287,7 @@ describe('scanBlockRange', () => {
       const result = await scanBlockRange(db, fakeClient(fakeBlock([tx])), 100n, 100n, {});
       expect(result.eventsStored).toBe(2);
       expect(result.blocksScanned).toBe(1);
+      expect(result.transactionsStored).toBe(1);
       expect(result.deploymentsFound).toBe(0);
     });
 
@@ -299,6 +300,7 @@ describe('scanBlockRange', () => {
       );
       expect(result.eventsStored).toBe(0);
       expect(result.blocksScanned).toBe(1);
+      expect(result.transactionsStored).toBe(0);
     });
 
     it('gracefully skips a null block (RPC returned nothing)', async () => {

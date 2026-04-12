@@ -22,7 +22,10 @@ export type MetricKey =
   | 'poolsViable'
   | 'queueDrops'
   | 'blocksIndexedLive'
-  | 'eventsIndexedLive';
+  | 'eventsIndexedLive'
+  | 'mempoolPollCount'
+  | 'mempoolOpnetTxsSeen'
+  | 'mempoolTxsFetched';
 
 export type MetricsSnapshot = Record<MetricKey, number>;
 
@@ -34,6 +37,9 @@ const METRIC_KEYS: MetricKey[] = [
   'queueDrops',
   'blocksIndexedLive',
   'eventsIndexedLive',
+  'mempoolPollCount',
+  'mempoolOpnetTxsSeen',
+  'mempoolTxsFetched',
 ];
 
 function makeZeroCounters(): MetricsSnapshot {

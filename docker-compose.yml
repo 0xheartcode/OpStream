@@ -3,11 +3,17 @@
 # Build context is the Opnet-devs/ parent so the local OpKit dep resolves.
 # Run from the OpStream/ directory:
 #
-#   SQLite (default):
+#   SQLite (default — indexer only):
 #     docker compose up -d
+#
+#   Indexer + mempool scanner (shared SQLite):
+#     docker compose --profile mempool up -d
 #
 #   Postgres (bundled):
 #     docker compose --profile postgres up -d
+#
+#   Postgres + mempool:
+#     docker compose --profile postgres --profile mempool up -d
 #
 #   Postgres (external — set DB_URL in .env):
 #     docker compose up -d           (no postgres profile needed)
@@ -45,6 +51,41 @@ services:
       timeout: 5s
       retries: 3
       start_period: 60s
+
+  # ── Mempool scanner (optional — activate with --profile mempool) ────────────
+  #
+  # Same image as the indexer, different mode. Shares the SQLite DB via volume
+  # mount (WAL mode handles concurrency) or Postgres via DB_URL.
+  #
+  # Requires BITCOIN_RPC_URL set in .env.
+  #
+  #   docker compose --profile mempool up -d
+  #
+  opstream-mempool:
+    build:
+      context: ..
+      dockerfile: OpStream/Dockerfile
+    image: opstream:latest
+    container_name: opstream-mempool
+    profiles: [mempool]
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      OPSTREAM_MODE: mempool
+    command: ["npx", "tsx", "src/main.ts", "live"]
+
+    volumes:
+      # Same data dir as the indexer — shared SQLite via WAL mode
+      - ./data:/app/data
+      - ./logs:/app/logs
+
+    depends_on:
+      opstream:
+        condition: service_healthy
+        required: false
+      postgres:
+        condition: service_healthy
+        required: false
 
   # ── Bundled Postgres (optional — activate with --profile postgres) ──────────
   postgres:

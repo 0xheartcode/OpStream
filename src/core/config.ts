@@ -5,7 +5,12 @@
  * Call loadConfig() once at startup after dotenv.config().
  */
 
+export type OpStreamMode = 'indexer' | 'mempool' | 'full';
+
 export interface OpStreamConfig {
+  // Run mode: 'indexer' (default), 'mempool', or 'full' (both)
+  mode: OpStreamMode;
+
   // OPNET / Bitcoin RPC
   opnetRpcUrl: string;
   bitcoinRpcUrl: string;
@@ -30,6 +35,12 @@ export interface OpStreamConfig {
 
   // WebSocket broadcast server port (0 = disabled)
   wsPort: number;
+
+  // JSON-RPC 2.0 HTTP server port (0 = disabled)
+  rpcPort: number;
+
+  // Mempool poller interval (ms) — only used in 'mempool' or 'full' mode
+  mempoolPollIntervalMs: number;
 }
 
 function parseBigInt(val: string | undefined, def: bigint): bigint {
@@ -42,8 +53,17 @@ function parseInt10(val: string | undefined, def: number): number {
   return isNaN(n) ? def : n;
 }
 
+const VALID_MODES: OpStreamMode[] = ['indexer', 'mempool', 'full'];
+
+function parseMode(val: string | undefined): OpStreamMode {
+  if (!val) return 'indexer';
+  const lower = val.toLowerCase() as OpStreamMode;
+  return VALID_MODES.includes(lower) ? lower : 'indexer';
+}
+
 export function loadConfig(): OpStreamConfig {
   return {
+    mode:              parseMode(process.env['OPSTREAM_MODE']),
     opnetRpcUrl:       process.env['OPNET_RPC_URL']       ?? 'https://mainnet.opnet.org',
     bitcoinRpcUrl:     process.env['BITCOIN_RPC_URL']     ?? '',
     bitcoinRpcUser:    process.env['BITCOIN_RPC_USER']    ?? '',
@@ -56,7 +76,9 @@ export function loadConfig(): OpStreamConfig {
     bootstrapChunkSize:  parseInt10(process.env['BOOTSTRAP_CHUNK_SIZE'], 500),
     bootstrapFromBlock:  parseBigInt(process.env['BOOTSTRAP_FROM_BLOCK'], 941400n),
     metricsIntervalSeconds: parseInt10(process.env['METRICS_INTERVAL_SECONDS'], 60),
-    wsPort: parseInt10(process.env['WS_PORT'], 0),
+    wsPort:  parseInt10(process.env['WS_PORT'],  0),
+    rpcPort: parseInt10(process.env['RPC_PORT'], 0),
+    mempoolPollIntervalMs: parseInt10(process.env['MEMPOOL_POLL_INTERVAL_MS'], 10_000),
   };
 }
 
@@ -91,5 +113,12 @@ export function validateConfig(config: OpStreamConfig): void {
         );
       }
     }
+  }
+
+  // Mempool mode requires Bitcoin RPC
+  if ((config.mode === 'mempool' || config.mode === 'full') && !config.bitcoinRpcUrl) {
+    throw new Error(
+      `Config validation failed: OPSTREAM_MODE="${config.mode}" requires BITCOIN_RPC_URL to be set.`,
+    );
   }
 }

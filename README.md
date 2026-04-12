@@ -60,7 +60,7 @@ explicitly out of scope. Updated as the system is tested and evolved.
 
 ### Unit-tested and verified
 
-Run with `npx vitest run` (58 tests across 3 suites):
+Run with `npx vitest run` (148 tests across 8 suites):
 
 | Suite | Feature | Coverage |
 |-------|---------|----------|
@@ -154,7 +154,7 @@ These have been run against mainnet and produce correct output:
 - **No native `getLogs` on OPNET** — `getLogs()` is a scan-based polyfill. Always prefer querying the local SQLite DB at runtime.
 - **Reorg detection is 10-block max** — deeper reorgs trigger a `WARN` and roll back 10 blocks. Has not occurred on OPNET mainnet in practice.
 - **Checkpoint granularity** — saved once per chunk (default 500 blocks). A crash mid-chunk re-scans the whole chunk. `ON CONFLICT DO NOTHING` makes re-scanning idempotent.
-- **Single-process only** — `openDb()` is a singleton. Two processes against the same SQLite file will conflict on writes.
+- **SQLite write contention** — `openDb()` is a singleton per process. Two processes (e.g., `indexer` + `mempool` mode) can share the same SQLite file via WAL mode, but high-write scenarios should use Postgres (`DB_URL`).
 
 ### Not part of OpStream (moved to `src/_pending_extraction/`)
 
@@ -187,13 +187,19 @@ Pool discovery logic (`processNativeSwapPools`, `processMotoswapPools`, etc.) wa
 | `BOOTSTRAP_FROM_BLOCK` | `941400` | Starting block for bootstrap |
 | `BOOTSTRAP_RPS` | `10` | Rate limit (requests per second) |
 | `BOOTSTRAP_CHUNK_SIZE` | `500` | Blocks per chunk |
+| `RPC_PORT` | `0` (disabled) | JSON-RPC 2.0 HTTP server port. Set to e.g. `3001` to enable. |
 | `WS_PORT` | `0` (disabled) | WebSocket broadcast port. Set to e.g. `8080` to enable. |
 | `WEBHOOK_URLS` | (none) | Comma-separated HTTP callback URLs for event notifications |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARN`, `ERROR` |
+| `OPSTREAM_MODE` | `indexer` | Run mode: `indexer`, `mempool`, or `full` (both) |
+| `MEMPOOL_POLL_INTERVAL_MS` | `10000` | Mempool poll interval in milliseconds |
+| `BITCOIN_RPC_URL` | (none) | Bitcoin Core RPC URL (required for `mempool`/`full` mode) |
+| `BITCOIN_RPC_USER` | (none) | Bitcoin Core RPC username |
+| `BITCOIN_RPC_PASS` | (none) | Bitcoin Core RPC password |
 
 ## Data Model
 
-9 tables, all chain-level:
+10 tables, all chain-level:
 
 | Table | Purpose |
 |-------|---------|
@@ -206,6 +212,7 @@ Pool discovery logic (`processNativeSwapPools`, `processMotoswapPools`, etc.) wa
 | `tokens` | OP20 metadata cache — written by OpKit, not OpStream |
 | `runtime_metrics` | Performance counters |
 | `error_log` | Error tracking |
+| `mempool_pending` | Pending OPNET txs from Bitcoin mempool (mempool/full mode) |
 
 ### What the `transactions` table captures
 
@@ -371,10 +378,186 @@ const stop = indexer.subscribe(currentBlock + 1);
 OpStream doesn't change when you add a new event type or entity. You add a handler in OpKit.
 OpStream's raw tables are the stable foundation; OpKit's derived tables are what your app queries.
 
+---
+
+## JSON-RPC 2.0 server
+
+Set `RPC_PORT` to expose a local HTTP endpoint. Any consumer currently pointing `JSONRpcProvider` at `mainnet.opnet.org` can point at `http://localhost:RPC_PORT` instead — known methods are answered from the local index, everything else is proxied transparently upstream.
+
+```bash
+RPC_PORT=3001 npx tsx src/main.ts start
+```
+
+### Implemented (served from local index)
+
+#### `btc_blockNumber`
+Returns the latest indexed block as a hex string.
+```bash
+curl -s -X POST http://localhost:3001 -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"btc_blockNumber","params":[]}' | jq
+```
+
+#### `btc_getLogs`
+Query events by contract address, event name, and/or block range. O(1) indexed SQL query — no block scanning.
+
+```bash
+curl -s -X POST http://localhost:3001 -H 'Content-Type: application/json' \
+  -d '{
+    "jsonrpc":"2.0","id":2,"method":"btc_getLogs",
+    "params":[{ "address":"bc1q...", "eventName":"Swap", "fromBlock":941400, "toBlock":"latest" }]
+  }' | jq '.result | length'
+```
+
+Filter params (all optional): `address` (string), `eventName` (string), `fromBlock` (number|`"latest"`), `toBlock` (number|`"latest"`).
+
+#### `btc_getBlockReceipts`
+All transactions and their events for a block in one call.
+```bash
+curl -s -X POST http://localhost:3001 -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":3,"method":"btc_getBlockReceipts","params":[941401]}' | jq
+```
+
+#### `btc_getTransaction`
+Single transaction metadata plus all its associated events by hash.
+```bash
+curl -s -X POST http://localhost:3001 -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":4,"method":"btc_getTransaction","params":["<tx_hash>"]}' | jq
+```
+
+### Proxy pass-through
+All other methods (`btc_call`, `btc_getBalance`, `btc_sendRawTransaction`, etc.) are forwarded verbatim to `OPNET_RPC_URL`. Works with both SQLite and Postgres backends via the `DbAdapter` abstraction.
+
+---
+
+## Mempool Scanning (v0.2 — experimental)
+
+OpStream can now poll the Bitcoin mempool for pending OPNET transactions before they confirm.
+This gives downstream consumers (trading bots, dashboards) visibility into what's about to
+land on-chain — information asymmetry on a low-competition chain.
+
+### How it works
+
+1. Poll `getrawmempool` from Bitcoin Core every N seconds (default 10s)
+2. Diff against an in-memory seen-set — only fetch raw hex for NEW txids
+3. Parse each raw Bitcoin tx for taproot witness data containing the OPNET magic bytes (`0x6f70` / "op")
+4. Discard non-OPNET transactions (99.9% of the mempool)
+5. Decompress the gzip-encoded calldata chunks, store in `mempool_pending` table
+6. Dispatch `MempoolPending` webhook/WS events (`blockNumber: -1` sentinel)
+
+### Run modes
+
+```bash
+# Default — indexer only (existing behavior, no change)
+npx tsx src/main.ts start
+
+# Mempool scanning only (separate server, no block indexing)
+OPSTREAM_MODE=mempool BITCOIN_RPC_URL=http://user:pass@btcnode:8332 npx tsx src/main.ts live
+
+# Both in one process (dev / single-server)
+OPSTREAM_MODE=full BITCOIN_RPC_URL=http://user:pass@btcnode:8332 npx tsx src/main.ts start
+```
+
+For production: run two OpStream instances (same binary, different `OPSTREAM_MODE`) pointing at
+the same database (SQLite WAL or Postgres). The mempool scanner can sit on a separate machine
+with fat bandwidth, while the block indexer runs lean.
+
+### Current implementation & known limitations
+
+This is a first-pass implementation. It works, it's tested, but several areas are flagged
+for iteration:
+
+**OPNET detection heuristic:** The parser searches witness tapscript data for the magic
+bytes `0x6f70` ("op") after an `OP_IF` opcode, per `@btc-vision/transaction`'s
+`CalldataGenerator` source. This has been verified against the CalldataGenerator code but
+**not yet battle-tested against a large volume of real mainnet mempool data**. False positives
+are possible if another protocol uses the same magic in the same script position. The pattern
+can be tightened iteratively.
+
+**Calldata decompression:** OPNET calldata is gzip-compressed at level 9 before being
+chunked into the tapscript. The parser decompresses and returns raw bytes. If decompression
+fails (corrupted data, different compression scheme), it falls back to returning the
+compressed bytes — downstream consumers can still detect the OPNET tx even without
+decoding its payload.
+
+**No calldata ABI decoding yet:** The `decoded_json` column in `mempool_pending` is always
+`NULL`. Decoding pending calldata into structured function calls (e.g., "this is a
+`reserveTokens(tokenX, 5000 sats)`") requires function selector constants and parameter
+layouts from OpKit. This is the next step — `calldataDecoders.ts` in OpKit, mirroring the
+existing `eventDecoders.ts` pattern.
+
+**First-poll burst:** On startup, the poller sees the entire current mempool as "new" and
+fetches raw hex for all txids. With a 50-concurrent batch limit this is manageable but
+creates a startup spike. A future optimization: persist the seen-set to DB so restarts
+don't re-scan everything.
+
+**No verbose mempool pre-filter yet:** Currently fetches raw hex for every new txid and
+filters in-memory. A future optimization: use `getrawmempool verbose=true` to pre-filter
+for OP_RETURN or taproot-spending txids before fetching full hex. This would dramatically
+reduce bandwidth on busy mempool periods.
+
+**Confirmed-at tracking:** The `confirmed_at` column exists but is not yet populated.
+When the block indexer confirms a block, it could UPDATE matching `mempool_pending` rows —
+giving you mempool-to-confirmation latency metrics. This cross-mode coordination is an
+enhancement.
+
+### `mempool_pending` table
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `txid` | TEXT PK | Bitcoin transaction ID |
+| `raw_payload_hex` | TEXT | Decompressed OPNET calldata as hex |
+| `contract_selector` | TEXT | First 4 bytes of payload (function selector), e.g. `0xdeadbeef` |
+| `decoded_json` | TEXT | Structured decode — NULL until OpKit decoders are wired |
+| `first_seen_at` | INTEGER | Unix timestamp when first detected in mempool |
+| `confirmed_at` | INTEGER | Unix timestamp when confirmed in a block (NULL = still pending) |
+| `pruned_at` | INTEGER | Soft-prune timestamp for old entries |
+
+---
+
+## TODO — Requires separate effort
+
+These features are architecturally feasible given OpStream's existing data — the required information is already indexed — but need non-trivial implementation work before they can ship.
+
+### Stateful log filters (`eth_newFilter` / `eth_getFilterChanges` / `eth_getFilterLogs`)
+
+**Why not done yet:** These methods require the RPC server to maintain state across requests: a filter registry mapping filter IDs to filter params, plus an accumulation buffer of matching events since the filter was created. The live indexer must feed each new event into all active filters as blocks are indexed. This also requires a filter expiry mechanism — idle filters must be garbage-collected — and careful memory management under high event throughput. The foundation is all there (event stream via `onEvent` callback, indexed SQLite). It is purely an implementation effort with some design decisions around filter lifetimes.
+
+### WebSocket `logs` subscription (`btc_subscribe`)
+
+**Why not done yet:** The WS server (`WS_PORT`) already exists but is push-only — the server broadcasts to all clients, clients cannot send messages. Adding subscription support requires making the WS layer bidirectional: the server must parse incoming client frames (client → server), route `btc_subscribe` / `btc_unsubscribe` requests to a per-client subscription registry, and push only matching events to each subscriber. This requires a medium rework of `src/indexer/webhooks.ts` — currently the RFC 6455 framing only handles server-to-client direction — plus routing logic tying per-client subscriptions to the live indexer's event stream.
+
+### Fee history (`eth_feeHistory` equivalent)
+
+**Why not done yet:** The `transactions` table stores `gas_used`, `burned_bitcoin`, `priority_fee`, and `max_gas_sat` per transaction. A per-block fee summary (min/max/percentiles) is fully computable from this data. What is missing is: (a) a spec for the response shape adapted to OPNET's fee model (it is not EIP-1559), and (b) the SQL aggregation query. Once the shape is agreed, implementation is a single SQL query and a new RPC handler.
+
+---
+
+## NOT POSSIBLE in OpStream
+
+These features require capabilities that OpStream fundamentally does not have. They cannot be added by extending the indexer — they require a full OPNET execution node.
+
+### `eth_estimateGas` / gas estimation per call
+
+OpStream is a pure indexer — it records what happened on-chain but has no contract execution engine. Estimating gas for a new transaction requires simulating it against live contract state, which requires a running smart contract VM. This is only possible via the upstream node at `OPNET_RPC_URL`. OpStream can proxy this call but cannot compute it locally.
+
+### `eth_call` with state overrides
+
+Same reason. State-override calls ("simulate as if this address had balance X") require forked state execution with a full VM. Not possible in an indexer.
+
+### `debug_traceTransaction` / `trace_transaction` / Parity-style traces
+
+Opcode-level execution traces require replaying the transaction through a full VM with debug instrumentation enabled. The OPNET ecosystem does not currently expose this capability at all — it is not a gap in OpStream specifically, it is a gap in the OPNET node software.
+
+### `eth_getProof` (EIP-1186 Merkle proofs)
+
+Trustless state verification requires a Merkle trie of all contract state at every block. OpStream stores indexed events and transaction metadata, not the full state trie. An archival full node with trie persistence would be required — this does not exist in the OPNET ecosystem today.
+
+---
+
 ## Development
 
 ```bash
-npx vitest run     # run tests (58 tests)
+npx vitest run     # run tests (148 tests)
 npx vitest         # watch mode
 npx tsc --noEmit   # type check
 npx eslint src tests  # lint

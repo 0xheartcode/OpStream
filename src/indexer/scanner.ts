@@ -58,6 +58,7 @@ interface OutputRow {
 export interface ScanResult {
   eventsStored: number;
   blocksScanned: number;
+  transactionsStored: number;
   deploymentsFound: number;
 }
 
@@ -263,6 +264,7 @@ export async function scanBlockRange(
   const startTime = Date.now();
   let lastCallTime = 0;
   let totalEvents = 0;
+  let totalTransactions = 0;
   let totalDeployments = 0;
   let totalBlocks = 0;
 
@@ -459,6 +461,7 @@ export async function scanBlockRange(
     }
 
     totalEvents += events.length;
+    totalTransactions += txRows.length;
     totalDeployments += deployments.length;
     totalBlocks++;
 
@@ -492,12 +495,13 @@ export async function scanBlockRange(
   log('INFO', 'scanner',
     `Synced ${Number(fromBlock)}..${Number(toBlock)}  ` +
     `${totalBlocks} blocks in ${humanElapsed(elapsedSec)} (${bps} blk/s)  ` +
-    `events: ${totalEvents}  deploys: ${totalDeployments}`,
+    `events: ${totalEvents}  transactions: ${totalTransactions}`,
   );
 
   return {
     eventsStored: totalEvents,
     blocksScanned: totalBlocks,
+    transactionsStored: totalTransactions,
     deploymentsFound: totalDeployments,
   };
 }

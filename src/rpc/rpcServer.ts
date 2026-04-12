@@ -11,8 +11,12 @@
  *   btc_getBlockByHash       — block header + tx list by block hash
  *   btc_getTransaction       — single tx + its events by hash
  *   btc_getTransactionReceipt — post-exec receipt (gas, status, logs) by tx hash
- *   btc_getCodeHash          — bytecode hash for a deployed contract (local hit,
- *                              proxy fallback for pre-bootstrap deployments)
+ *   btc_getCodeHash          — **OpStream-local extension**: bytecode hash for a
+ *                              deployed contract. No proxy fallback — the upstream
+ *                              OPNET RPC does not expose a getCodeHash method
+ *                              (it has btc_getCode, which returns full bytecode).
+ *                              Returns null for contracts that are not in the
+ *                              local contract_deployments index.
  *
  * All other methods are transparently proxied to the upstream OPNET node
  * (OPNET_RPC_URL), making OpStream a complete drop-in replacement for any
@@ -489,17 +493,22 @@ async function handleGetTransactionReceipt(
 /**
  * btc_getCodeHash — bytecode hash for a deployed contract.
  *
- * Serves from contract_deployments (scanner writes bytecode_hash for every
- * OPNetTransactionTypes.Deployment, not just OP20 tokens). On local miss the
- * request is proxied upstream — a contract deployed before BOOTSTRAP_FROM_BLOCK
- * will not be in the local index, and EOAs (which have no code) are also
- * correctly handled by the upstream node returning null/zero-hash.
+ * OpStream-local extension. The upstream OPNET RPC does not expose a
+ * getCodeHash method (it has btc_getCode, which returns full bytecode),
+ * so there is no proxy fallback: a contract that is not in our local
+ * contract_deployments index returns null. That correctly represents both:
+ *
+ *   - EOAs / unknown addresses (no code on chain)
+ *   - Contracts deployed before BOOTSTRAP_FROM_BLOCK (we never saw them)
+ *
+ * If you need authoritative bytecode for pre-bootstrap contracts, call
+ * btc_getCode instead — that method is proxied unchanged to the upstream
+ * node, which has full chain history.
  */
 async function handleGetCodeHash(
   id: string | number | null | undefined,
   params: unknown,
   db: DbAdapter,
-  upstreamUrl: string,
 ): Promise<JsonRpcResponse> {
   if (!Array.isArray(params) || typeof params[0] !== 'string') return fail(id, INVALID_PARAMS);
   const address = params[0];
@@ -510,7 +519,7 @@ async function handleGetCodeHash(
       [address],
     );
     if (row && row.bytecode_hash) return ok(id, row.bytecode_hash);
-    return proxyToUpstream(id, 'btc_getCodeHash', params, upstreamUrl);
+    return ok(id, null);
   } catch (e) {
     return fail(id, { ...INTERNAL_ERROR, message: `Internal error: ${String(e)}` });
   }
@@ -522,17 +531,36 @@ async function proxyToUpstream(
   params: unknown,
   upstreamUrl: string,
 ): Promise<JsonRpcResponse> {
+  let res: Response;
   try {
     const body = JSON.stringify({ jsonrpc: '2.0', id: id ?? null, method, params });
-    const res = await fetch(upstreamUrl, {
+    res = await fetch(upstreamUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body,
       signal: AbortSignal.timeout(10_000),
     });
-    return await res.json() as JsonRpcResponse;
   } catch (e) {
     return fail(id, { code: INTERNAL_ERROR.code, message: `Upstream proxy error: ${String(e)}` });
+  }
+
+  // Upstream returned a non-2xx status (404 for unknown methods, 5xx for
+  // node errors). Surface the status code cleanly instead of blindly trying
+  // to parse whatever non-JSON body the node returned.
+  if (!res.ok) {
+    return fail(id, {
+      code: INTERNAL_ERROR.code,
+      message: `Upstream returned HTTP ${res.status} for method ${method}`,
+    });
+  }
+
+  try {
+    return await res.json() as JsonRpcResponse;
+  } catch {
+    return fail(id, {
+      code: INTERNAL_ERROR.code,
+      message: `Upstream returned non-JSON response for method ${method}`,
+    });
   }
 }
 
@@ -562,7 +590,7 @@ async function handleSingle(
     case 'btc_getBlockByHash':        return handleGetBlockByHash(id, params, db);
     case 'btc_getTransaction':        return handleGetTransaction(id, params, db);
     case 'btc_getTransactionReceipt': return handleGetTransactionReceipt(id, params, db);
-    case 'btc_getCodeHash':           return handleGetCodeHash(id, params, db, upstreamUrl);
+    case 'btc_getCodeHash':           return handleGetCodeHash(id, params, db);
     default:                          return proxyToUpstream(id, method, params, upstreamUrl);
   }
 }

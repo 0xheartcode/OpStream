@@ -487,6 +487,8 @@ describe('RPC server — proxy pass-through', () => {
 
   it('unknown method is proxied with correct body', async () => {
     const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
       json: () => Promise.resolve({ jsonrpc: '2.0', id: 1, result: 'proxied' }),
     } as Response);
     vi.stubGlobal('fetch', mockFetch);
@@ -512,6 +514,35 @@ describe('RPC server — proxy pass-through', () => {
     const b = body as { error: { code: number; message: string } };
     expect(b.error.code).toBe(-32603);
     expect(b.error.message).toContain('Upstream proxy error');
+  });
+
+  it('proxy: upstream HTTP 404 returns clean -32603, not an exception string', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 404,
+      json: () => Promise.reject(new Error('should not be called')),
+    } as unknown as Response);
+    vi.stubGlobal('fetch', mockFetch);
+
+    const { body } = await nodePost(url, { jsonrpc: '2.0', id: 1, method: 'btc_notAMethod', params: [] });
+    const b = body as { error: { code: number; message: string } };
+    expect(b.error.code).toBe(-32603);
+    expect(b.error.message).toBe('Upstream returned HTTP 404 for method btc_notAMethod');
+  });
+
+  it('proxy: non-JSON upstream body returns clean -32603', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      // Simulate upstream returning HTML
+      json: () => Promise.reject(new SyntaxError('Unexpected token < in JSON')),
+    } as unknown as Response);
+    vi.stubGlobal('fetch', mockFetch);
+
+    const { body } = await nodePost(url, { jsonrpc: '2.0', id: 1, method: 'btc_chainId', params: [] });
+    const b = body as { error: { code: number; message: string } };
+    expect(b.error.code).toBe(-32603);
+    expect(b.error.message).toBe('Upstream returned non-JSON response for method btc_chainId');
   });
 });
 
@@ -735,13 +766,11 @@ describe('btc_getCodeHash', () => {
     }
   });
 
-  it('local miss falls through to upstream proxy', async () => {
+  it('local miss returns null — no proxy fallback (upstream has no getCodeHash)', async () => {
     const db = createTestDb();
-    const { url, close } = await startTestServer(db, 'http://upstream.example');
+    const { url, close } = await startTestServer(db, 'http://upstream.invalid');
 
-    const mockFetch = vi.fn().mockResolvedValue({
-      json: () => Promise.resolve({ jsonrpc: '2.0', id: 1, result: '0xupstreamhash' }),
-    } as Response);
+    const mockFetch = vi.fn();
     vi.stubGlobal('fetch', mockFetch);
 
     try {
@@ -751,12 +780,8 @@ describe('btc_getCodeHash', () => {
         method: 'btc_getCodeHash',
         params: ['bc1qunknown'],
       });
-      expect(mockFetch).toHaveBeenCalledOnce();
-      const [calledUrl, init] = mockFetch.mock.calls[0] as [string, RequestInit];
-      expect(calledUrl).toBe('http://upstream.example');
-      const sent = JSON.parse(init.body as string) as { method: string };
-      expect(sent.method).toBe('btc_getCodeHash');
-      expect((body as { result: string }).result).toBe('0xupstreamhash');
+      expect((body as { result: unknown }).result).toBeNull();
+      expect(mockFetch).not.toHaveBeenCalled();
     } finally {
       await close();
     }

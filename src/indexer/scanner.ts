@@ -103,6 +103,17 @@ export interface ScanOptions {
    * owns the display (e.g. two-line TTY rewrite in bootstrap).
    */
   onProgress?: (doneInChunk: number, chunkLine: string) => void;
+  /**
+   * When true, store every tx in a block including plain Bitcoin txs that
+   * have no OPNET interaction (`tx_type = 'generic'`), and all of their
+   * outputs. Defaults to false — in typical OPNET blocks generics account
+   * for ~95% of rows and nobody queries them, so persisting them turns
+   * tx_outputs into the dominant table for no practical gain.
+   *
+   * Set via OPSTREAM_STORE_GENERIC_TXS=true when you genuinely need a
+   * full-archive copy of the chain.
+   */
+  storeGenericTxs?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -135,9 +146,10 @@ export function humanElapsed(seconds: number): string {
 // Deployment helpers
 // ---------------------------------------------------------------------------
 
-function hashBytecode(bytecode: Uint8Array | string | undefined): string {
-  if (!bytecode) return '';
+function hashBytecode(bytecode: Uint8Array | string | undefined): string | null {
+  if (!bytecode) return null;
   const buf = bytecode instanceof Uint8Array ? Buffer.from(bytecode) : Buffer.from(bytecode, 'hex');
+  if (buf.length === 0) return null;
   return createHash('sha256').update(buf).digest('hex').slice(0, 16);
 }
 
@@ -261,6 +273,7 @@ export async function scanBlockRange(
   const minIntervalMs = opts?.minIntervalMs ?? 0;
   const onEvent = opts?.onEvent;
   const decode = opts?.decode ?? null;
+  const storeGenericTxs = opts?.storeGenericTxs ?? false;
   const startTime = Date.now();
   let lastCallTime = 0;
   let totalEvents = 0;
@@ -302,7 +315,7 @@ export async function scanBlockRange(
       revertReason:   string | null;
     })[] = [];
     const txRows: TxRow[] = [];
-    const deployments: Array<{ blockNumber: number; txHash: string; contractAddr: string; deployer: string; bytecodeHash: string }> = [];
+    const deployments: Array<{ blockNumber: number; txHash: string; contractAddr: string; deployer: string; bytecodeHash: string | null }> = [];
 
     const blockTxs = block.transactions as TransactionBase<OPNetTransactionTypes>[];
     const outputRows: OutputRow[] = [];
@@ -319,6 +332,13 @@ export async function scanBlockRange(
         tx.OPNetType === OPNetTransactionTypes.Interaction ? 'interaction' :
         tx.OPNetType === OPNetTransactionTypes.Deployment   ? 'deployment'  :
         'generic';
+
+      // Skip generic (non-OPNET) txs entirely when not in full-archive mode.
+      // In typical OPNET blocks these are ~95% of the transactions and nothing
+      // in the query surface uses them, so persisting them bloats the DB ~10x
+      // for no practical value. Opt in with storeGenericTxs=true when you need
+      // a complete chain archive.
+      if (txType === 'generic' && !storeGenericTxs) continue;
 
       let calldata: Buffer | null = null;
       let calldataLength: number | null = null;

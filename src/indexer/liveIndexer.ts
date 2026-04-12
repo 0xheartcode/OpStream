@@ -47,6 +47,8 @@ export interface LiveIndexerOptions {
   scanFn?: ScanBlocksFn;
   /** Called for each event as it's indexed. Used for WebSocket/webhook dispatch. */
   onEvent?: OnEventCallback;
+  /** Forwarded to scanBlockRange — see ScanOptions.storeGenericTxs. Default false. */
+  storeGenericTxs?: boolean;
 }
 
 export interface LiveIndexerHealth {
@@ -139,6 +141,7 @@ export function startLiveIndexer(
   const maxBlocksPerCycle = opts?.maxBlocksPerCycle ?? 100;
   const scanFn            = opts?.scanFn;
   const onEvent           = opts?.onEvent;
+  const storeGenericTxs   = opts?.storeGenericTxs ?? false;
 
   let running = true;
   let lastPollAt = 0;
@@ -187,7 +190,7 @@ export function startLiveIndexer(
 
         const result = scanFn
           ? await scanFn(db, client, fromBlock, toBlock)
-          : await scanBlockRange(db, client, fromBlock, toBlock, { onEvent });
+          : await scanBlockRange(db, client, fromBlock, toBlock, { onEvent, storeGenericTxs });
 
         metrics.increment('blocksIndexedLive', blocksAhead);
         metrics.increment('eventsIndexedLive', result.eventsStored);

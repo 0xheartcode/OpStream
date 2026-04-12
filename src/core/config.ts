@@ -32,6 +32,9 @@ export interface OpStreamConfig {
   // 0n = unset — scan to current chain tip. When set, bootstrap stops at this
   // block (inclusive), enabling deterministic bounded test runs.
   bootstrapToBlock: bigint;
+  // When true, store every tx including non-OPNET generics. Off by default —
+  // in real OPNET blocks generics are ~95% of rows and nothing queries them.
+  storeGenericTxs: boolean;
 
   // Metrics emission interval (s)
   metricsIntervalSeconds: number;
@@ -79,6 +82,7 @@ export function loadConfig(): OpStreamConfig {
     bootstrapChunkSize:  parseInt10(process.env['BOOTSTRAP_CHUNK_SIZE'], 500),
     bootstrapFromBlock:  parseBigInt(process.env['BOOTSTRAP_FROM_BLOCK'], 941400n),
     bootstrapToBlock:    parseBigInt(process.env['BOOTSTRAP_TO_BLOCK'], 0n),
+    storeGenericTxs:     process.env['OPSTREAM_STORE_GENERIC_TXS'] === 'true',
     metricsIntervalSeconds: parseInt10(process.env['METRICS_INTERVAL_SECONDS'], 60),
     wsPort:  parseInt10(process.env['WS_PORT'],  0),
     rpcPort: parseInt10(process.env['RPC_PORT'], 0),

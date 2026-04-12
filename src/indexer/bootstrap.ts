@@ -30,6 +30,8 @@ export interface BootstrapOptions {
    * to the chain tip if it exceeds it. Throws if toBlock < startBlock.
    */
   toBlock?: bigint;
+  /** Forwarded to scanBlockRange — see ScanOptions.storeGenericTxs. Default false. */
+  storeGenericTxs?: boolean;
 }
 
 export interface BootstrapResult {
@@ -134,6 +136,7 @@ export async function runBootstrapCore(
   const chunkSize = BigInt(opts?.chunkSize ?? 500);
   const fromBlockOverride = opts?.fromBlock ?? 0n;
   const toBlockCap = opts?.toBlock ?? 0n;
+  const storeGenericTxs = opts?.storeGenericTxs ?? false;
   const rps = bootstrapRps ?? 10;
   const minIntervalMs = rps > 0 ? Math.floor(1000 / rps) : 0;
 
@@ -188,6 +191,7 @@ export async function runBootstrapCore(
 
     const result = await scanBlockRange(db, client, chunkStart, chunkEnd, {
       minIntervalMs,
+      storeGenericTxs,
       onProgress: display
         ? (doneInChunk, chunkLine) => display.update(chunkStartOffset, doneInChunk, chunkLine)
         : undefined,
@@ -232,9 +236,10 @@ export async function runBootstrap(): Promise<void> {
   const result = await runBootstrapCore(
     db, client,
     {
-      chunkSize: config.bootstrapChunkSize,
-      fromBlock: config.bootstrapFromBlock,
-      toBlock:   config.bootstrapToBlock,
+      chunkSize:       config.bootstrapChunkSize,
+      fromBlock:       config.bootstrapFromBlock,
+      toBlock:         config.bootstrapToBlock,
+      storeGenericTxs: config.storeGenericTxs,
     },
     config.bootstrapRps,
   );

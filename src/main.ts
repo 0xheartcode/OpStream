@@ -38,6 +38,9 @@ Environment:
   BOOTSTRAP_FROM_BLOCK       Starting block (default: 941400)
   BOOTSTRAP_TO_BLOCK         Stop block (inclusive). Unset = scan to chain tip.
                              Enables bounded test runs (e.g. 1000 blocks).
+  OPSTREAM_STORE_GENERIC_TXS Store non-OPNET Bitcoin txs in this block (default: false).
+                             Off saves ~95% of disk space; set true for a full
+                             chain archive.
   BOOTSTRAP_RPS              Rate limit: requests per second (default: 10)
   BOOTSTRAP_CHUNK_SIZE       Blocks per chunk (default: 500)
   WS_PORT                    WebSocket broadcast port, 0=disabled (default: 0)
@@ -179,6 +182,7 @@ async function main(): Promise<void> {
         log('INFO', 'main', 'Bootstrap complete — starting live indexer');
         const indexerHandle = startLiveIndexer(db, client, {
           onEvent: (event) => webhooks.dispatch(event),
+          storeGenericTxs: config.storeGenericTxs,
         });
         stopPromises.push(
           (indexerHandle as ReturnType<typeof startLiveIndexer> & { _stopPromise: Promise<void> })._stopPromise,
@@ -247,6 +251,7 @@ async function main(): Promise<void> {
         log('INFO', 'main', 'Starting live indexer...', { dbPath: config.dbPath });
         const indexerHandle = startLiveIndexer(db, client, {
           onEvent: (event) => webhooks.dispatch(event),
+          storeGenericTxs: config.storeGenericTxs,
         });
         stopPromises.push(
           (indexerHandle as ReturnType<typeof startLiveIndexer> & { _stopPromise: Promise<void> })._stopPromise,

@@ -50,6 +50,25 @@ function fakeBlock(txs: TransactionBase<OPNetTransactionTypes>[], blockNum = 100
   } as unknown as Block;
 }
 
+/** Minimal Generic (plain Bitcoin) transaction with outputs — no OPNET content. */
+function fakeGenericTx(overrides: Record<string, unknown> = {}): TransactionBase<OPNetTransactionTypes> {
+  return {
+    id:              'tx_generic',
+    OPNetType:       OPNetTransactionTypes.Generic,
+    outputs: [
+      { index: 0, value: 5000n, scriptPubKey: { type: 'p2wpkh', address: 'bc1qrecv' } },
+      { index: 1, value: 3000n, scriptPubKey: { type: 'p2wpkh', address: 'bc1qchange' } },
+    ],
+    events:         {},
+    hash:           'txhash_generic',
+    index:          0,
+    inputs:         [],
+    receiptProofs:  [],
+    rawEvents:      {},
+    ...overrides,
+  } as unknown as TransactionBase<OPNetTransactionTypes>;
+}
+
 function fakeClient(block: Block | null): OpnetRpcClient {
   return {
     getBlock:       vi.fn().mockResolvedValue(block),
@@ -74,6 +93,48 @@ describe('scanBlockRange', () => {
 
   beforeEach(() => {
     db = createTestDb();
+  });
+
+  // ── storeGenericTxs flag ─────────────────────────────────────────────────
+
+  describe('storeGenericTxs flag', () => {
+    it('default (off): generic txs and their outputs are NOT persisted', async () => {
+      const mix = fakeBlock(
+        [
+          fakeInteractionTx({ id: 'tx_i' }),
+          fakeGenericTx({ id: 'tx_g1' }),
+          fakeGenericTx({ id: 'tx_g2' }),
+        ],
+        100,
+      );
+      await scanBlockRange(db, fakeClient(mix), 100n, 100n, {});
+
+      const txs = await db.all<{ tx_type: string; tx_hash: string }>('SELECT tx_type, tx_hash FROM transactions ORDER BY tx_hash');
+      expect(txs).toHaveLength(1);
+      expect(txs[0]!.tx_type).toBe('interaction');
+
+      // No generic outputs should have been inserted either
+      const outs = await db.all<{ tx_hash: string }>("SELECT tx_hash FROM tx_outputs WHERE tx_hash LIKE 'tx_g%'");
+      expect(outs).toHaveLength(0);
+    });
+
+    it('opt-in (storeGenericTxs=true): every tx is persisted, including generics', async () => {
+      const mix = fakeBlock(
+        [
+          fakeInteractionTx({ id: 'tx_i' }),
+          fakeGenericTx({ id: 'tx_g1' }),
+          fakeGenericTx({ id: 'tx_g2' }),
+        ],
+        100,
+      );
+      await scanBlockRange(db, fakeClient(mix), 100n, 100n, { storeGenericTxs: true });
+
+      const types = await db.all<{ tx_type: string; n: number }>(
+        'SELECT tx_type, COUNT(*) AS n FROM transactions GROUP BY tx_type ORDER BY tx_type',
+      );
+      const byType = Object.fromEntries(types.map((t) => [t.tx_type, Number(t.n)]));
+      expect(byType).toEqual({ generic: 2, interaction: 1 });
+    });
   });
 
   // ── onEvent enrichment ────────────────────────────────────────────────────

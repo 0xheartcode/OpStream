@@ -4,10 +4,15 @@
  * Implements a subset of the OPNET RPC surface served directly from the local
  * index — no block scanning required:
  *
- *   btc_getLogs          — query indexed events by address/name/block range (O(1))
- *   btc_blockNumber      — latest indexed block from scan_checkpoints
- *   btc_getBlockReceipts — all txs + events for a block in one call
- *   btc_getTransaction   — single tx + its events by hash
+ *   btc_getLogs              — query indexed events by address/name/block range (O(1))
+ *   btc_blockNumber          — latest indexed block from scan_checkpoints
+ *   btc_getBlockReceipts     — all txs + events for a block in one call
+ *   btc_getBlockByNumber     — block header + tx list (hashes or full)
+ *   btc_getBlockByHash       — block header + tx list by block hash
+ *   btc_getTransaction       — single tx + its events by hash
+ *   btc_getTransactionReceipt — post-exec receipt (gas, status, logs) by tx hash
+ *   btc_getCodeHash          — bytecode hash for a deployed contract (local hit,
+ *                              proxy fallback for pre-bootstrap deployments)
  *
  * All other methods are transparently proxied to the upstream OPNET node
  * (OPNET_RPC_URL), making OpStream a complete drop-in replacement for any
@@ -60,6 +65,20 @@ export interface RpcBlockReceipts {
   timestamp: number | null;
   tx_count: number;
   transactions: RpcTransaction[];
+}
+
+/**
+ * Result shape for btc_getBlockByNumber / btc_getBlockByHash.
+ *
+ * `transactions` is either an array of tx hashes (slim, default) or an array
+ * of full RpcTransaction objects (when includeTx=true).
+ */
+export interface RpcBlock {
+  block_number: number;
+  block_hash: string;
+  timestamp: number | null;
+  tx_count: number;
+  transactions: string[] | RpcTransaction[];
 }
 
 // ---------------------------------------------------------------------------
@@ -339,6 +358,164 @@ async function handleGetTransaction(
   }
 }
 
+/**
+ * Shared block-body loader used by getBlockByNumber and getBlockByHash.
+ * Returns null when the block is not in the local index.
+ */
+async function loadBlock(
+  db: DbAdapter,
+  where: 'block_number' | 'block_hash',
+  key: number | string,
+  includeTx: boolean,
+): Promise<RpcBlock | null> {
+  const blockRow = await db.get<BlockDbRow>(
+    `SELECT block_number, block_hash, timestamp, tx_count FROM blocks WHERE ${where} = ?`,
+    [key],
+  );
+  if (!blockRow) return null;
+
+  const txRows = await db.all<TxDbRow>(
+    `SELECT tx_hash, block_number, tx_index, tx_type, from_address, contract_address,
+            gas_used, burned_bitcoin, priority_fee, failed, revert_reason
+     FROM transactions WHERE block_number = ? ORDER BY tx_index`,
+    [blockRow.block_number],
+  );
+
+  if (!includeTx) {
+    return {
+      block_number: blockRow.block_number,
+      block_hash:   blockRow.block_hash,
+      timestamp:    blockRow.timestamp,
+      tx_count:     blockRow.tx_count,
+      transactions: txRows.map((t) => t.tx_hash),
+    };
+  }
+
+  const eventRows = await db.all<EventRow & { log_index: number }>(
+    'SELECT * FROM events WHERE block_number = ? ORDER BY tx_hash, log_index',
+    [blockRow.block_number],
+  );
+  const eventsByTx = new Map<string, Array<EventRow & { log_index: number }>>();
+  for (const row of eventRows) {
+    const bucket = eventsByTx.get(row.tx_hash) ?? [];
+    bucket.push(row);
+    eventsByTx.set(row.tx_hash, bucket);
+  }
+
+  return {
+    block_number: blockRow.block_number,
+    block_hash:   blockRow.block_hash,
+    timestamp:    blockRow.timestamp,
+    tx_count:     blockRow.tx_count,
+    transactions: txRows.map((tx) =>
+      rowToTx(tx, (eventsByTx.get(tx.tx_hash) ?? []).map(rowToLog)),
+    ),
+  };
+}
+
+async function handleGetBlockByNumber(
+  id: string | number | null | undefined,
+  params: unknown,
+  db: DbAdapter,
+): Promise<JsonRpcResponse> {
+  if (!Array.isArray(params) || params.length < 1) return fail(id, INVALID_PARAMS);
+
+  let latest: number | undefined;
+  if (params[0] === 'latest') latest = await getLatestIndexedBlock(db);
+  const blockNumber = resolveBlock(params[0], latest);
+  if (blockNumber === undefined) return fail(id, INVALID_PARAMS);
+
+  const includeTx = params[1] === true;
+
+  try {
+    const result = await loadBlock(db, 'block_number', blockNumber, includeTx);
+    return ok(id, result);
+  } catch (e) {
+    return fail(id, { ...INTERNAL_ERROR, message: `Internal error: ${String(e)}` });
+  }
+}
+
+async function handleGetBlockByHash(
+  id: string | number | null | undefined,
+  params: unknown,
+  db: DbAdapter,
+): Promise<JsonRpcResponse> {
+  if (!Array.isArray(params) || typeof params[0] !== 'string') return fail(id, INVALID_PARAMS);
+  const includeTx = params[1] === true;
+
+  try {
+    const result = await loadBlock(db, 'block_hash', params[0], includeTx);
+    return ok(id, result);
+  } catch (e) {
+    return fail(id, { ...INTERNAL_ERROR, message: `Internal error: ${String(e)}` });
+  }
+}
+
+/**
+ * btc_getTransactionReceipt — post-execution data for a tx.
+ *
+ * Returns the same shape as btc_getTransaction. OpStream's TxDbRow already
+ * contains both pre-exec (from, contract_address) and post-exec (gas_used,
+ * failed, revert_reason) fields, so we reuse rowToTx.
+ */
+async function handleGetTransactionReceipt(
+  id: string | number | null | undefined,
+  params: unknown,
+  db: DbAdapter,
+): Promise<JsonRpcResponse> {
+  if (!Array.isArray(params) || typeof params[0] !== 'string') return fail(id, INVALID_PARAMS);
+  const txHash = params[0];
+
+  try {
+    const txRow = await db.get<TxDbRow>(
+      `SELECT tx_hash, block_number, tx_index, tx_type, from_address, contract_address,
+              gas_used, burned_bitcoin, priority_fee, failed, revert_reason
+       FROM transactions WHERE tx_hash = ?`,
+      [txHash],
+    );
+    if (!txRow) return ok(id, null);
+
+    const eventRows = await db.all<EventRow & { log_index: number }>(
+      'SELECT * FROM events WHERE tx_hash = ? ORDER BY log_index',
+      [txHash],
+    );
+
+    return ok(id, rowToTx(txRow, eventRows.map(rowToLog)));
+  } catch (e) {
+    return fail(id, { ...INTERNAL_ERROR, message: `Internal error: ${String(e)}` });
+  }
+}
+
+/**
+ * btc_getCodeHash — bytecode hash for a deployed contract.
+ *
+ * Serves from token_deployments (scanner writes bytecode_hash for every
+ * OPNetTransactionTypes.Deployment, not just OP20 tokens). On local miss the
+ * request is proxied upstream — a contract deployed before BOOTSTRAP_FROM_BLOCK
+ * will not be in the local index, and EOAs (which have no code) are also
+ * correctly handled by the upstream node returning null/zero-hash.
+ */
+async function handleGetCodeHash(
+  id: string | number | null | undefined,
+  params: unknown,
+  db: DbAdapter,
+  upstreamUrl: string,
+): Promise<JsonRpcResponse> {
+  if (!Array.isArray(params) || typeof params[0] !== 'string') return fail(id, INVALID_PARAMS);
+  const address = params[0];
+
+  try {
+    const row = await db.get<{ bytecode_hash: string | null }>(
+      'SELECT bytecode_hash FROM token_deployments WHERE contract_address = ? LIMIT 1',
+      [address],
+    );
+    if (row && row.bytecode_hash) return ok(id, row.bytecode_hash);
+    return proxyToUpstream(id, 'btc_getCodeHash', params, upstreamUrl);
+  } catch (e) {
+    return fail(id, { ...INTERNAL_ERROR, message: `Internal error: ${String(e)}` });
+  }
+}
+
 async function proxyToUpstream(
   id: string | number | null | undefined,
   method: string,
@@ -378,11 +555,15 @@ async function handleSingle(
   const { id, method, params } = raw;
 
   switch (method) {
-    case 'btc_getLogs':          return handleGetLogs(id, params, db);
-    case 'btc_blockNumber':      return handleBlockNumber(id, db);
-    case 'btc_getBlockReceipts': return handleGetBlockReceipts(id, params, db);
-    case 'btc_getTransaction':   return handleGetTransaction(id, params, db);
-    default:                     return proxyToUpstream(id, method, params, upstreamUrl);
+    case 'btc_getLogs':               return handleGetLogs(id, params, db);
+    case 'btc_blockNumber':           return handleBlockNumber(id, db);
+    case 'btc_getBlockReceipts':      return handleGetBlockReceipts(id, params, db);
+    case 'btc_getBlockByNumber':      return handleGetBlockByNumber(id, params, db);
+    case 'btc_getBlockByHash':        return handleGetBlockByHash(id, params, db);
+    case 'btc_getTransaction':        return handleGetTransaction(id, params, db);
+    case 'btc_getTransactionReceipt': return handleGetTransactionReceipt(id, params, db);
+    case 'btc_getCodeHash':           return handleGetCodeHash(id, params, db, upstreamUrl);
+    default:                          return proxyToUpstream(id, method, params, upstreamUrl);
   }
 }
 

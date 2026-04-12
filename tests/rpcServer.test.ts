@@ -85,6 +85,22 @@ async function seedTx(db: DbAdapter, txHash: string, blockNumber: number, txInde
   );
 }
 
+/** Seed a contract deployment row (table is still `token_deployments` pre-rename). */
+async function seedDeployment(
+  db: DbAdapter,
+  contractAddress: string,
+  bytecodeHash: string,
+  blockNumber = 100,
+  txHash = 'deploy_' + contractAddress,
+): Promise<void> {
+  await db.run(
+    `INSERT OR IGNORE INTO token_deployments
+       (block_number, tx_hash, contract_address, deployer, bytecode_hash)
+     VALUES (?, ?, ?, 'bc1qdeployer', ?)`,
+    [blockNumber, txHash, contractAddress, bytecodeHash],
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -543,6 +559,218 @@ describe('RPC server — batch requests', () => {
     const bad = body.find((r) => r.id === 2)!;
     expect(ok.result).toBe('0xc8');
     expect(bad.error?.code).toBe(-32600);
+  });
+});
+
+describe('btc_getBlockByNumber', () => {
+  let url: string;
+  let close: () => Promise<void>;
+  let db: DbAdapter;
+
+  beforeAll(async () => {
+    db = createTestDb();
+    await seedCheckpoint(db, 500);
+    await seedBlock(db, 941500, 'blockhash_941500');
+    await seedTx(db, 'txBN_A', 941500, 0);
+    await seedTx(db, 'txBN_B', 941500, 1);
+    await insertEventsBatch(db, [
+      { blockNumber: 941500, txHash: 'txBN_A', contractAddress: 'bc1qbn', eventName: 'Mint', rawData: Buffer.from('01', 'hex') },
+    ]);
+    ({ url, close } = await startTestServer(db));
+  });
+
+  afterAll(() => close());
+
+  it('unknown block returns null', async () => {
+    const { body } = await rpc(url, 'btc_getBlockByNumber', [999999]);
+    expect(body.result).toBeNull();
+  });
+
+  it('slim form returns tx hashes (default)', async () => {
+    const { body } = await rpc(url, 'btc_getBlockByNumber', [941500]);
+    expect(body.result.block_number).toBe(941500);
+    expect(body.result.block_hash).toBe('blockhash_941500');
+    expect(body.result.transactions).toEqual(['txBN_A', 'txBN_B']);
+  });
+
+  it('full form (includeTx=true) returns RpcTransaction objects with events', async () => {
+    const { body } = await rpc(url, 'btc_getBlockByNumber', [941500, true]);
+    const txs = body.result.transactions as Array<{ tx_hash: string; events: unknown[] }>;
+    expect(txs).toHaveLength(2);
+    expect(txs[0]!.tx_hash).toBe('txBN_A');
+    expect(txs[0]!.events).toHaveLength(1);
+    expect(txs[1]!.tx_hash).toBe('txBN_B');
+    expect(txs[1]!.events).toHaveLength(0);
+  });
+
+  it('"latest" resolves via checkpoint', async () => {
+    const { body } = await rpc(url, 'btc_getBlockByNumber', ['latest']);
+    // Checkpoint 500, no block at 500 → null (not an error)
+    expect(body.result).toBeNull();
+    expect(body.error).toBeUndefined();
+  });
+
+  it('hex block number is parsed', async () => {
+    const hex = '0x' + (941500).toString(16);
+    const { body } = await rpc(url, 'btc_getBlockByNumber', [hex]);
+    expect(body.result.block_number).toBe(941500);
+  });
+
+  it('missing params → -32602', async () => {
+    const { body } = await rpc(url, 'btc_getBlockByNumber');
+    expect(body.error.code).toBe(-32602);
+  });
+});
+
+describe('btc_getBlockByHash', () => {
+  let url: string;
+  let close: () => Promise<void>;
+  let db: DbAdapter;
+
+  beforeAll(async () => {
+    db = createTestDb();
+    await seedBlock(db, 941600, 'blockhash_941600');
+    await seedTx(db, 'txBH_A', 941600, 0);
+    ({ url, close } = await startTestServer(db));
+  });
+
+  afterAll(() => close());
+
+  it('unknown hash returns null', async () => {
+    const { body } = await rpc(url, 'btc_getBlockByHash', ['nope']);
+    expect(body.result).toBeNull();
+  });
+
+  it('known hash returns the block (slim)', async () => {
+    const { body } = await rpc(url, 'btc_getBlockByHash', ['blockhash_941600']);
+    expect(body.result.block_number).toBe(941600);
+    expect(body.result.transactions).toEqual(['txBH_A']);
+  });
+
+  it('includeTx=true expands transactions', async () => {
+    const { body } = await rpc(url, 'btc_getBlockByHash', ['blockhash_941600', true]);
+    const txs = body.result.transactions as Array<{ tx_hash: string }>;
+    expect(txs[0]!.tx_hash).toBe('txBH_A');
+  });
+
+  it('non-string param → -32602', async () => {
+    const { body } = await rpc(url, 'btc_getBlockByHash', [42]);
+    expect(body.error.code).toBe(-32602);
+  });
+});
+
+describe('btc_getTransactionReceipt', () => {
+  let url: string;
+  let close: () => Promise<void>;
+  let db: DbAdapter;
+
+  beforeAll(async () => {
+    db = createTestDb();
+    await seedTx(db, 'txRcpt', 200, 0);
+    // A failed tx with revert_reason
+    await db.run(
+      `INSERT OR IGNORE INTO transactions
+         (tx_hash, block_number, tx_index, tx_type, from_address, contract_address, gas_used, burned_bitcoin, priority_fee, failed, revert_reason, created_at)
+       VALUES ('txFail', 201, 0, 'Interaction', 'bc1qf', 'bc1qc', '3000', '50', '5', 1, 'out of gas', ?)`,
+      [Math.floor(Date.now() / 1000)],
+    );
+    await insertEventsBatch(db, [
+      { blockNumber: 200, txHash: 'txRcpt', contractAddress: 'bc1qr', eventName: 'Transfer', rawData: Buffer.from('77', 'hex') },
+    ]);
+    ({ url, close } = await startTestServer(db));
+  });
+
+  afterAll(() => close());
+
+  it('unknown hash returns null', async () => {
+    const { body } = await rpc(url, 'btc_getTransactionReceipt', ['0xdeadbeef']);
+    expect(body.result).toBeNull();
+  });
+
+  it('successful tx receipt includes events and failed=false', async () => {
+    const { body } = await rpc(url, 'btc_getTransactionReceipt', ['txRcpt']);
+    expect(body.result.tx_hash).toBe('txRcpt');
+    expect(body.result.failed).toBe(false);
+    expect(body.result.events).toHaveLength(1);
+    expect(body.result.events[0].topics[0]).toBe('Transfer');
+  });
+
+  it('failed tx surfaces failed=true + revert_reason', async () => {
+    const { body } = await rpc(url, 'btc_getTransactionReceipt', ['txFail']);
+    expect(body.result.failed).toBe(true);
+    expect(body.result.revert_reason).toBe('out of gas');
+  });
+
+  it('missing params → -32602', async () => {
+    const { body } = await rpc(url, 'btc_getTransactionReceipt');
+    expect(body.error.code).toBe(-32602);
+  });
+});
+
+describe('btc_getCodeHash', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('local hit returns stored bytecode_hash without touching upstream', async () => {
+    const db = createTestDb();
+    await seedDeployment(db, 'bc1qcontract1', '0xabc123hash');
+    const { url, close } = await startTestServer(db, 'http://upstream.invalid');
+
+    const mockFetch = vi.fn();
+    vi.stubGlobal('fetch', mockFetch);
+
+    try {
+      const { body } = await nodePost(url, {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'btc_getCodeHash',
+        params: ['bc1qcontract1'],
+      });
+      expect((body as { result: string }).result).toBe('0xabc123hash');
+      expect(mockFetch).not.toHaveBeenCalled();
+    } finally {
+      await close();
+    }
+  });
+
+  it('local miss falls through to upstream proxy', async () => {
+    const db = createTestDb();
+    const { url, close } = await startTestServer(db, 'http://upstream.example');
+
+    const mockFetch = vi.fn().mockResolvedValue({
+      json: () => Promise.resolve({ jsonrpc: '2.0', id: 1, result: '0xupstreamhash' }),
+    } as Response);
+    vi.stubGlobal('fetch', mockFetch);
+
+    try {
+      const { body } = await nodePost(url, {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'btc_getCodeHash',
+        params: ['bc1qunknown'],
+      });
+      expect(mockFetch).toHaveBeenCalledOnce();
+      const [calledUrl, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+      expect(calledUrl).toBe('http://upstream.example');
+      const sent = JSON.parse(init.body as string) as { method: string };
+      expect(sent.method).toBe('btc_getCodeHash');
+      expect((body as { result: string }).result).toBe('0xupstreamhash');
+    } finally {
+      await close();
+    }
+  });
+
+  it('non-string param → -32602', async () => {
+    const db = createTestDb();
+    const { url, close } = await startTestServer(db);
+    try {
+      const { body } = await rpc(url, 'btc_getCodeHash', [42]);
+      expect(body.error.code).toBe(-32602);
+    } finally {
+      await close();
+    }
   });
 });
 

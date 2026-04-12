@@ -41,6 +41,10 @@ interface TxRow {
   calldata: Buffer | null;
   calldataLength: number | null;
   senderPubKeyHash: string | null;
+  /** ITransactionReceipt.receipt raw bytes (archival field for btc_getTransactionReceipt). */
+  receipt: Buffer | null;
+  /** ITransactionReceipt.receiptProofs serialized as JSON string array. */
+  receiptProofsJson: string | null;
 }
 
 interface OutputRow {
@@ -182,15 +186,60 @@ export async function saveCheckpoint(db: DbAdapter, block: bigint): Promise<void
 // ---------------------------------------------------------------------------
 
 const SQL_SAVE_BLOCK = `
-  INSERT INTO blocks (block_number, block_hash, timestamp, tx_count, opnet_tx_count)
-  VALUES (?, ?, ?, ?, ?)
+  INSERT INTO blocks (
+    block_number, block_hash, timestamp, tx_count, opnet_tx_count,
+    previous_block_hash, previous_block_checksum, bits, nonce, version,
+    size, weight, stripped_size, median_time,
+    checksum_root, merkle_root, storage_root, receipt_root,
+    ema, base_gas, block_gas_used, checksum_proofs
+  )
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT (block_number) DO UPDATE SET
-    block_hash     = excluded.block_hash,
-    timestamp      = excluded.timestamp,
-    tx_count       = excluded.tx_count,
-    opnet_tx_count = excluded.opnet_tx_count
+    block_hash              = excluded.block_hash,
+    timestamp               = excluded.timestamp,
+    tx_count                = excluded.tx_count,
+    opnet_tx_count          = excluded.opnet_tx_count,
+    previous_block_hash     = excluded.previous_block_hash,
+    previous_block_checksum = excluded.previous_block_checksum,
+    bits                    = excluded.bits,
+    nonce                   = excluded.nonce,
+    version                 = excluded.version,
+    size                    = excluded.size,
+    weight                  = excluded.weight,
+    stripped_size           = excluded.stripped_size,
+    median_time             = excluded.median_time,
+    checksum_root           = excluded.checksum_root,
+    merkle_root             = excluded.merkle_root,
+    storage_root            = excluded.storage_root,
+    receipt_root            = excluded.receipt_root,
+    ema                     = excluded.ema,
+    base_gas                = excluded.base_gas,
+    block_gas_used          = excluded.block_gas_used,
+    checksum_proofs         = excluded.checksum_proofs
 `;
 const SQL_GET_BLOCK_HASH = `SELECT block_hash FROM blocks WHERE block_number = ?`;
+
+/** Archival header fields from IBlockCommon, serialized for the scanner to pass to saveBlock. */
+export interface ArchivalBlockFields {
+  previousBlockHash?:     string | null;
+  previousBlockChecksum?: string | null;
+  bits?:                  string | null;
+  nonce?:                 number | null;
+  version?:               number | null;
+  size?:                  number | null;
+  weight?:                number | null;
+  strippedSize?:          number | null;
+  medianTime?:            number | null;
+  checksumRoot?:          string | null;
+  merkleRoot?:            string | null;
+  storageRoot?:           string | null;
+  receiptRoot?:           string | null;
+  ema?:                   string | null;
+  baseGas?:               string | null;
+  blockGasUsed?:          string | null;
+  /** checksumProofs is an array of [index, proofHashes[]]; stored as JSON. */
+  checksumProofsJson?:    string | null;
+}
 
 /**
  * Persist a block row.
@@ -200,6 +249,8 @@ const SQL_GET_BLOCK_HASH = `SELECT block_hash FROM blocks WHERE block_number = ?
  *                      field. Pass null when unknown.
  * @param opnetTxCount  OPNET-relevant txs actually persisted by the scanner
  *                      (interaction + deployment). OpStream-local metric.
+ * @param archival      Optional archival header fields from IBlockCommon —
+ *                      needed for faithful upstream-shape responses.
  */
 export async function saveBlock(
   db: DbAdapter,
@@ -208,8 +259,28 @@ export async function saveBlock(
   timestamp: number | null,
   txCount: number | null,
   opnetTxCount: number = 0,
+  archival: ArchivalBlockFields = {},
 ): Promise<void> {
-  await db.run(SQL_SAVE_BLOCK, [blockNumber, blockHash, timestamp, txCount, opnetTxCount]);
+  await db.run(SQL_SAVE_BLOCK, [
+    blockNumber, blockHash, timestamp, txCount, opnetTxCount,
+    archival.previousBlockHash     ?? null,
+    archival.previousBlockChecksum ?? null,
+    archival.bits                  ?? null,
+    archival.nonce                 ?? null,
+    archival.version               ?? null,
+    archival.size                  ?? null,
+    archival.weight                ?? null,
+    archival.strippedSize          ?? null,
+    archival.medianTime            ?? null,
+    archival.checksumRoot          ?? null,
+    archival.merkleRoot            ?? null,
+    archival.storageRoot           ?? null,
+    archival.receiptRoot           ?? null,
+    archival.ema                   ?? null,
+    archival.baseGas               ?? null,
+    archival.blockGasUsed          ?? null,
+    archival.checksumProofsJson    ?? null,
+  ]);
 }
 
 export async function getBlockHash(db: DbAdapter, blockNumber: number): Promise<string | null> {
@@ -243,8 +314,9 @@ const SQL_INSERT_TX = `
   INSERT INTO transactions
     (tx_hash, block_number, tx_index, tx_type, from_address, contract_address,
      gas_used, special_gas_used, burned_bitcoin, priority_fee, max_gas_sat,
-     failed, revert_reason, calldata, calldata_length, sender_pub_key_hash)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     failed, revert_reason, calldata, calldata_length, sender_pub_key_hash,
+     receipt, receipt_proofs)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT DO NOTHING
 `;
 
@@ -366,6 +438,23 @@ export async function scanBlockRange(
         }
       }
 
+      // Archival receipt fields — receipt bytes + per-tx merkle proofs.
+      // These are exposed by the SDK on TransactionBase via the
+      // ITransactionReceipt mixin; we persist them so the RPC server can
+      // answer btc_getTransactionReceipt locally with the exact upstream
+      // shape. Empty arrays / absent values store as NULL, not empty string.
+      const receiptBytes = (tx as unknown as { receipt?: Uint8Array | string })['receipt'];
+      let receiptBuf: Buffer | null = null;
+      if (receiptBytes instanceof Uint8Array && receiptBytes.length > 0) {
+        receiptBuf = Buffer.from(receiptBytes);
+      } else if (typeof receiptBytes === 'string' && receiptBytes.length > 0) {
+        receiptBuf = Buffer.from(receiptBytes, 'hex');
+      }
+      const receiptProofsArr = (tx as unknown as { receiptProofs?: string[] })['receiptProofs'];
+      const receiptProofsJson = Array.isArray(receiptProofsArr) && receiptProofsArr.length > 0
+        ? JSON.stringify(receiptProofsArr)
+        : null;
+
       txRows.push({
         txHash:          tx.id,
         blockNumber,
@@ -383,6 +472,8 @@ export async function scanBlockRange(
         calldata,
         calldataLength,
         senderPubKeyHash,
+        receipt:         receiptBuf,
+        receiptProofsJson,
       });
 
       for (const output of tx.outputs) {
@@ -441,6 +532,7 @@ export async function scanBlockRange(
             t.txHash, t.blockNumber, t.txIndex, t.txType, t.fromAddress, t.contractAddress,
             t.gasUsed, t.specialGasUsed, t.burnedBitcoin, t.priorityFee, t.maxGasSat,
             t.failed, t.revertReason, t.calldata, t.calldataLength, t.senderPubKeyHash,
+            t.receipt, t.receiptProofsJson,
           ]);
         }
         for (const o of outputRows) {
@@ -461,12 +553,51 @@ export async function scanBlockRange(
         }
         // tx_count = raw Bitcoin block size (upstream-compatible).
         // opnet_tx_count = OPNET txs we actually stored (interaction + deployment).
+        // Archival header fields are pulled from the SDK block object via an
+        // untyped cast — opnet's Block class exposes IBlockCommon but the
+        // exported type we use here is narrowed.
+        const b = block as unknown as {
+          previousBlockHash?:     string;
+          previousBlockChecksum?: string;
+          bits?:                  string;
+          nonce?:                 number | bigint;
+          version?:               number;
+          size?:                  number;
+          weight?:                number;
+          strippedSize?:          number;
+          medianTime?:            number;
+          checksumRoot?:          string;
+          merkleRoot?:            string;
+          storageRoot?:           string;
+          receiptRoot?:           string;
+          ema?:                   string | bigint;
+          baseGas?:               string | bigint;
+          gasUsed?:               string | bigint;
+          checksumProofs?:        unknown;
+        };
         await db.run(SQL_SAVE_BLOCK, [
           blockNumber,
           String(block.hash ?? ''),
           blockTimestamp,
           blockTxs.length,
           txRows.length,
+          b.previousBlockHash     ?? null,
+          b.previousBlockChecksum ?? null,
+          b.bits                  ?? null,
+          b.nonce != null ? Number(b.nonce) : null,
+          b.version               ?? null,
+          b.size                  ?? null,
+          b.weight                ?? null,
+          b.strippedSize          ?? null,
+          b.medianTime            ?? null,
+          b.checksumRoot          ?? null,
+          b.merkleRoot            ?? null,
+          b.storageRoot           ?? null,
+          b.receiptRoot           ?? null,
+          b.ema     != null ? String(b.ema)     : null,
+          b.baseGas != null ? String(b.baseGas) : null,
+          b.gasUsed != null ? String(b.gasUsed) : null,
+          b.checksumProofs != null ? JSON.stringify(b.checksumProofs) : null,
         ]);
       });
     } catch (err) {

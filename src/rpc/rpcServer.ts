@@ -1,35 +1,44 @@
 /**
  * JSON-RPC 2.0 HTTP server for OpStream.
  *
- * Two strict namespaces:
+ * OpStream acts as a **local archival node**: for any OPNET RPC method that
+ * can be answered from indexed data, it serves the exact upstream shape
+ * locally at index speed. Methods that require live chain state (btc_call,
+ * btc_getBalance, btc_getStorageAt, btc_sendRawTransaction, etc.) are
+ * forwarded to the upstream node unchanged. Any opnet-SDK client can point
+ * at OpStream and get transparent speedup with no code changes.
  *
- *   btc_*        Real OPNET RPC methods. Proxied faithfully to the upstream
- *                node at OPNET_RPC_URL (+/api/v1/json-rpc). Allowlisted
- *                against the known upstream surface — unknown btc_* methods
- *                return -32601 Method not found locally without hitting the
- *                network, avoiding 10s timeouts for typos.
+ *   btc_*        OPNET RPC methods.
  *
- *   opstream_*   OpStream-local handlers served from the indexed SQLite/
- *                Postgres data. These are either (a) fast alternatives to
- *                upstream methods with richer response shapes that embed
- *                events and tx metadata, or (b) queries upstream doesn't
- *                support at all (getLogs, getCodeHash).
+ *                Served locally (archival parity with upstream shape):
+ *                  btc_getBlockByNumber      — IBlockCommon header shape
+ *                  btc_getBlockByHash        — same, by hash
+ *                  btc_getTransactionReceipt — ITransactionReceipt shape
  *
- *     opstream_getLogs                query indexed events by address/name/block range
- *     opstream_blockNumber            latest indexed checkpoint (can lag the chain tip)
- *     opstream_getBlockByNumber       block header + full txs + nested events
- *     opstream_getBlockByHash         same by block hash
- *     opstream_getBlockReceipts       every tx + its events for a block
- *     opstream_getTransaction         tx metadata + events by tx hash
- *     opstream_getTransactionReceipt  post-exec receipt from the local index
- *     opstream_getCodeHash            bytecode hash from contract_deployments
+ *                Proxied (state / live-node / too-many-fields):
+ *                  btc_blockNumber           — chain tip, not indexed tip
+ *                  btc_getTransactionByHash  — full tx with raw bytes, pow, etc.
+ *                  btc_call, btc_getBalance, btc_getStorageAt, btc_getCode,
+ *                  btc_sendRawTransaction, btc_getUTXOs, mempool + epoch
+ *                  methods, etc. — 28-method UPSTREAM_METHODS allowlist
+ *                  guards against typos so unknowns return local -32601.
  *
- * Why not serve the btc_* names locally? The upstream shapes (for the
- * handful that overlap) include merkle proofs and chain-state fields that
- * OpStream doesn't store. Returning a lookalike with null fields would be
- * dishonest; returning the richer shape under btc_* would break any
- * consumer that expects native upstream JSON. Strict namespaces are the
- * clean answer: btc_* is the chain, opstream_* is our index.
+ *   opstream_*   OpStream extensions — queries upstream doesn't support at
+ *                all, or richer response shapes that embed events and tx
+ *                metadata in one call for indexer consumers:
+ *
+ *                  opstream_getLogs                events by contract / name / range
+ *                  opstream_blockNumber            latest indexed checkpoint
+ *                  opstream_getBlockByNumber       rich: header + txs + events
+ *                  opstream_getBlockByHash         same, by hash
+ *                  opstream_getBlockReceipts       every tx + events for a block
+ *                  opstream_getTransaction         tx metadata + events by hash
+ *                  opstream_getTransactionReceipt  rich receipt with tx metadata
+ *                  opstream_getCodeHash            bytecode hash from contract_deployments
+ *
+ * Blocks rows scanned before the archival schema additions have NULL for
+ * header fields we didn't previously store; a fresh bootstrap populates
+ * them all.
  *
  * Enable with: RPC_PORT=3001  (default 0 = disabled)
  * Works with both SQLite and Postgres via the DbAdapter abstraction.
@@ -159,17 +168,19 @@ const MAX_BODY_BYTES = 4 * 1024 * 1024; // 4 MB
 
 /**
  * Every btc_* method the upstream OPNET RPC actually exposes, taken verbatim
- * from opnet/build/providers/interfaces/JSONRpcMethods.js. Proxy requests for
- * names not in this set are rejected locally with -32601 so typos and
- * deprecated method names don't cost a round trip to upstream.
+ * from opnet/build/providers/interfaces/JSONRpcMethods.js.
+ *
+ * Methods NOT in this set (typos, deprecated names) return -32601 locally
+ * without a network round trip. Methods in this set are proxied to upstream
+ * UNLESS they're handled locally first in the dispatch switch — a handful
+ * of methods (getBlockByNumber, getBlockByHash, getTransactionReceipt) are
+ * served from the local archival index before the allowlist check.
  */
 const UPSTREAM_METHODS: ReadonlySet<string> = new Set([
   'btc_blockNumber',
   'btc_chainId',
   'btc_reorg',
-  'btc_getBlockByHash',
   'btc_getBlockByChecksum',
-  'btc_getBlockByNumber',
   'btc_gas',
   'btc_getTransactionByHash',
   'btc_sendRawTransaction',
@@ -180,7 +191,6 @@ const UPSTREAM_METHODS: ReadonlySet<string> = new Set([
   'btc_getBalance',
   'btc_blockWitness',
   'btc_internal',
-  'btc_getTransactionReceipt',
   'btc_getCode',
   'btc_getStorageAt',
   'btc_latestEpoch',
@@ -588,6 +598,175 @@ async function handleGetCodeHash(
   }
 }
 
+// ---------------------------------------------------------------------------
+// btc_* archival handlers — served locally with the exact upstream shape
+// ---------------------------------------------------------------------------
+
+/** Full archival row for btc_getBlockBy* responses. Columns mirror IBlockCommon. */
+interface ArchivalBlockRow {
+  block_number:             number;
+  block_hash:               string;
+  timestamp:                number | null;
+  tx_count:                 number | null;
+  previous_block_hash:      string | null;
+  previous_block_checksum:  string | null;
+  bits:                     string | null;
+  nonce:                    number | null;
+  version:                  number | null;
+  size:                     number | null;
+  weight:                   number | null;
+  stripped_size:            number | null;
+  median_time:              number | null;
+  checksum_root:            string | null;
+  merkle_root:              string | null;
+  storage_root:             string | null;
+  receipt_root:             string | null;
+  ema:                      string | null;
+  base_gas:                 string | null;
+  block_gas_used:           string | null;
+  checksum_proofs:          string | null;  // JSON text
+}
+
+const ARCHIVAL_BLOCK_COLS =
+  `block_number, block_hash, timestamp, tx_count,
+   previous_block_hash, previous_block_checksum, bits, nonce, version,
+   size, weight, stripped_size, median_time,
+   checksum_root, merkle_root, storage_root, receipt_root,
+   ema, base_gas, block_gas_used, checksum_proofs`;
+
+/** Reshape an ArchivalBlockRow into the upstream IBlockCommon JSON shape. */
+function blockRowToUpstream(row: ArchivalBlockRow): Record<string, unknown> {
+  return {
+    hash:                  row.block_hash,
+    height:                String(row.block_number),
+    previousBlockHash:     row.previous_block_hash,
+    previousBlockChecksum: row.previous_block_checksum,
+    bits:                  row.bits,
+    nonce:                 row.nonce,
+    version:               row.version,
+    size:                  row.size,
+    txCount:               row.tx_count,
+    weight:                row.weight,
+    strippedSize:          row.stripped_size,
+    time:                  row.timestamp,
+    medianTime:            row.median_time,
+    checksumRoot:          row.checksum_root,
+    merkleRoot:            row.merkle_root,
+    storageRoot:           row.storage_root,
+    receiptRoot:           row.receipt_root,
+    ema:                   row.ema,
+    baseGas:               row.base_gas,
+    gasUsed:               row.block_gas_used,
+    checksumProofs:        row.checksum_proofs ? JSON.parse(row.checksum_proofs) as unknown : null,
+  };
+}
+
+async function handleBtcGetBlockByNumber(
+  id: string | number | null | undefined,
+  params: unknown,
+  db: DbAdapter,
+): Promise<JsonRpcResponse> {
+  if (!Array.isArray(params) || params.length < 1) return fail(id, INVALID_PARAMS);
+  let latest: number | undefined;
+  if (params[0] === 'latest') latest = await getLatestIndexedBlock(db);
+  const blockNumber = resolveBlock(params[0], latest);
+  if (blockNumber === undefined) return fail(id, INVALID_PARAMS);
+
+  try {
+    const row = await db.get<ArchivalBlockRow>(
+      `SELECT ${ARCHIVAL_BLOCK_COLS} FROM blocks WHERE block_number = ?`,
+      [blockNumber],
+    );
+    if (!row) return ok(id, null);
+    return ok(id, blockRowToUpstream(row));
+  } catch (e) {
+    return fail(id, { ...INTERNAL_ERROR, message: `Internal error: ${String(e)}` });
+  }
+}
+
+async function handleBtcGetBlockByHash(
+  id: string | number | null | undefined,
+  params: unknown,
+  db: DbAdapter,
+): Promise<JsonRpcResponse> {
+  if (!Array.isArray(params) || typeof params[0] !== 'string') return fail(id, INVALID_PARAMS);
+
+  try {
+    const row = await db.get<ArchivalBlockRow>(
+      `SELECT ${ARCHIVAL_BLOCK_COLS} FROM blocks WHERE block_hash = ?`,
+      [params[0]],
+    );
+    if (!row) return ok(id, null);
+    return ok(id, blockRowToUpstream(row));
+  } catch (e) {
+    return fail(id, { ...INTERNAL_ERROR, message: `Internal error: ${String(e)}` });
+  }
+}
+
+/**
+ * Convert a stored decimal bigint string to the 0x-prefixed hex form used
+ * by upstream OPNET responses. "554155299" → "0x2107bd23".
+ */
+function bigintToHex(v: string | null): string {
+  if (!v) return '0x0';
+  try { return '0x' + BigInt(v).toString(16); } catch { return '0x0'; }
+}
+
+/** Row shape used by btc_getTransactionReceipt. */
+interface ReceiptTxRow {
+  tx_hash:          string;
+  gas_used:         string | null;
+  special_gas_used: string | null;
+  failed:           number;
+  revert_reason:    string | null;
+  receipt:          Buffer | null;
+  receipt_proofs:   string | null;  // JSON text
+}
+
+async function handleBtcGetTransactionReceipt(
+  id: string | number | null | undefined,
+  params: unknown,
+  db: DbAdapter,
+): Promise<JsonRpcResponse> {
+  if (!Array.isArray(params) || typeof params[0] !== 'string') return fail(id, INVALID_PARAMS);
+  const txHash = params[0];
+
+  try {
+    const txRow = await db.get<ReceiptTxRow>(
+      `SELECT tx_hash, gas_used, special_gas_used, failed, revert_reason, receipt, receipt_proofs
+       FROM transactions WHERE tx_hash = ?`,
+      [txHash],
+    );
+    if (!txRow) return ok(id, null);
+
+    const eventRows = await db.all<EventRow & { log_index: number }>(
+      'SELECT * FROM events WHERE tx_hash = ? ORDER BY log_index',
+      [txHash],
+    );
+
+    // Match upstream shape exactly — array of {contractAddress, type, data: base64}.
+    const events = eventRows.map((e) => ({
+      contractAddress: e.contract_address,
+      type:            e.event_name,
+      data:            e.event_raw.toString('base64'),
+    }));
+
+    const receiptProofs = txRow.receipt_proofs ? JSON.parse(txRow.receipt_proofs) as string[] : [];
+    const receiptBase64 = txRow.receipt ? txRow.receipt.toString('base64') : '';
+
+    return ok(id, {
+      receipt:        receiptBase64,
+      receiptProofs,
+      events,
+      revert:         txRow.failed ? txRow.revert_reason : undefined,
+      gasUsed:        bigintToHex(txRow.gas_used),
+      specialGasUsed: bigintToHex(txRow.special_gas_used),
+    });
+  } catch (e) {
+    return fail(id, { ...INTERNAL_ERROR, message: `Internal error: ${String(e)}` });
+  }
+}
+
 async function proxyToUpstream(
   id: string | number | null | undefined,
   method: string,
@@ -655,6 +834,15 @@ async function handleSingle(
     case 'opstream_getTransaction':        return handleGetTransaction(id, params, db);
     case 'opstream_getTransactionReceipt': return handleGetTransactionReceipt(id, params, db);
     case 'opstream_getCodeHash':           return handleGetCodeHash(id, params, db);
+  }
+
+  // btc_* archival handlers — same name, same shape as upstream, answered
+  // from the local archival index. The opnet SDK's JSONRpcProvider sends
+  // these names natively, so any client just works with a speedup.
+  switch (method) {
+    case 'btc_getBlockByNumber':      return handleBtcGetBlockByNumber(id, params, db);
+    case 'btc_getBlockByHash':        return handleBtcGetBlockByHash(id, params, db);
+    case 'btc_getTransactionReceipt': return handleBtcGetTransactionReceipt(id, params, db);
   }
 
   // btc_* — strict proxy against the known upstream surface. Anything not

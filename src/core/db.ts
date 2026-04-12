@@ -33,12 +33,33 @@ PRAGMA foreign_keys = ON;
 -- (interaction + deployment) actually persisted by the scanner. With
 -- OPSTREAM_STORE_GENERIC_TXS off (default) tx_count is typically ~20x larger
 -- than opnet_tx_count.
+-- Full IBlockCommon columns so btc_getBlockByNumber / btc_getBlockByHash can
+-- be served locally with the exact upstream shape. Fields not populated on
+-- older rows (pre-archival schema) return NULL — consumers that want full
+-- archival responses should reset + re-bootstrap.
 CREATE TABLE IF NOT EXISTS blocks (
-  block_number    INTEGER PRIMARY KEY,
-  block_hash      TEXT NOT NULL,
-  timestamp       INTEGER,
-  tx_count        INTEGER,
-  opnet_tx_count  INTEGER NOT NULL DEFAULT 0
+  block_number            INTEGER PRIMARY KEY,
+  block_hash              TEXT NOT NULL,
+  timestamp               INTEGER,
+  tx_count                INTEGER,
+  opnet_tx_count          INTEGER NOT NULL DEFAULT 0,
+  previous_block_hash     TEXT,
+  previous_block_checksum TEXT,
+  bits                    TEXT,
+  nonce                   INTEGER,
+  version                 INTEGER,
+  size                    INTEGER,
+  weight                  INTEGER,
+  stripped_size           INTEGER,
+  median_time             INTEGER,
+  checksum_root           TEXT,
+  merkle_root             TEXT,
+  storage_root            TEXT,
+  receipt_root            TEXT,
+  ema                     TEXT,
+  base_gas                TEXT,
+  block_gas_used          TEXT,
+  checksum_proofs         TEXT
 );
 
 CREATE TABLE IF NOT EXISTS transactions (
@@ -58,6 +79,9 @@ CREATE TABLE IF NOT EXISTS transactions (
   calldata             BLOB,
   calldata_length      INTEGER,
   sender_pub_key_hash  TEXT,
+  -- ITransactionReceipt archival fields (for btc_getTransactionReceipt parity)
+  receipt              BLOB,
+  receipt_proofs       TEXT,
   created_at           INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
@@ -262,6 +286,51 @@ function runMigrations(db: Database.Database): void {
         db.exec(`DROP TABLE block_hashes`);
       }
     }
+    // Archival-node block header fields — added so btc_getBlockByNumber and
+    // btc_getBlockByHash can be served locally with the exact upstream shape.
+    // Existing rows get NULL for any field they were scanned without; a
+    // fresh bootstrap populates them all. Columns added idempotently.
+    const archivalBlockCols = [
+      ['previous_block_hash',     'TEXT'],
+      ['previous_block_checksum', 'TEXT'],
+      ['bits',                    'TEXT'],
+      ['nonce',                   'INTEGER'],
+      ['version',                 'INTEGER'],
+      ['size',                    'INTEGER'],
+      ['weight',                  'INTEGER'],
+      ['stripped_size',           'INTEGER'],
+      ['median_time',             'INTEGER'],
+      ['checksum_root',           'TEXT'],
+      ['merkle_root',             'TEXT'],
+      ['storage_root',            'TEXT'],
+      ['receipt_root',            'TEXT'],
+      ['ema',                     'TEXT'],
+      ['base_gas',                'TEXT'],
+      ['block_gas_used',          'TEXT'],
+      ['checksum_proofs',         'TEXT'],
+    ] as const;
+    const currentBlockCols = new Set(
+      (db.prepare('PRAGMA table_info(blocks)').all() as Array<{ name: string }>).map(c => c.name),
+    );
+    for (const [name, type] of archivalBlockCols) {
+      if (!currentBlockCols.has(name)) {
+        db.exec(`ALTER TABLE blocks ADD COLUMN ${name} ${type}`);
+      }
+    }
+
+    // Archival tx receipt fields — receipt bytes + receipt merkle proofs.
+    // Needed for faithful btc_getTransactionReceipt responses. Existing rows
+    // get NULL until rescanned.
+    const currentTxCols = new Set(
+      (db.prepare('PRAGMA table_info(transactions)').all() as Array<{ name: string }>).map(c => c.name),
+    );
+    if (!currentTxCols.has('receipt')) {
+      db.exec(`ALTER TABLE transactions ADD COLUMN receipt BLOB`);
+    }
+    if (!currentTxCols.has('receipt_proofs')) {
+      db.exec(`ALTER TABLE transactions ADD COLUMN receipt_proofs TEXT`);
+    }
+
     // blocks.tx_count semantic swap to match upstream btc_getBlockByNumber:
     //   tx_count       = raw Bitcoin block size (was btc_tx_count in the
     //                    previous schema, or the same column repurposed from

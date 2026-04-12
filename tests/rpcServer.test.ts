@@ -810,6 +810,195 @@ describe('opstream_getCodeHash', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// btc_* archival handlers — local-served upstream-shape responses
+// ---------------------------------------------------------------------------
+
+/** Seed a fully-populated archival block row, mirroring IBlockCommon fields. */
+async function seedArchivalBlock(db: DbAdapter, n: number, hash: string): Promise<void> {
+  await db.run(
+    `INSERT OR REPLACE INTO blocks (
+       block_number, block_hash, timestamp, tx_count, opnet_tx_count,
+       previous_block_hash, previous_block_checksum, bits, nonce, version,
+       size, weight, stripped_size, median_time,
+       checksum_root, merkle_root, storage_root, receipt_root,
+       ema, base_gas, block_gas_used, checksum_proofs
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      n, hash, 1_700_000_000_000 + n, 3448, 7,
+      'prev_hash', 'prev_checksum', '1701f0cc', 4149709870, 742178816,
+      1611176, 3993803, 794209, 1_700_000_000_000 + n - 600,
+      'checksum_root_hex', 'merkle_root_hex', '0xstorage', '0xreceipt',
+      'ema_val', 'base_gas_val', '0xblockgas',
+      JSON.stringify([[0, ['0xproof0a', '0xproof0b']], [1, ['0xproof1a']]]),
+    ],
+  );
+}
+
+describe('btc_getBlockByNumber (archival)', () => {
+  let url: string;
+  let close: () => Promise<void>;
+  let db: DbAdapter;
+
+  beforeAll(async () => {
+    db = createTestDb();
+    await seedArchivalBlock(db, 941400, 'blockhash_941400');
+    ({ url, close } = await startTestServer(db));
+  });
+  afterAll(() => close());
+
+  it('returns upstream IBlockCommon shape with all fields populated', async () => {
+    const { body } = await rpc(url, 'btc_getBlockByNumber', [941400]);
+    const r = body.result;
+    expect(r.hash).toBe('blockhash_941400');
+    expect(r.height).toBe('941400'); // string, per upstream
+    expect(r.txCount).toBe(3448);
+    expect(r.bits).toBe('1701f0cc');
+    expect(r.nonce).toBe(4149709870);
+    expect(r.version).toBe(742178816);
+    expect(r.size).toBe(1611176);
+    expect(r.weight).toBe(3993803);
+    expect(r.strippedSize).toBe(794209);
+    expect(r.previousBlockHash).toBe('prev_hash');
+    expect(r.merkleRoot).toBe('merkle_root_hex');
+    expect(r.storageRoot).toBe('0xstorage');
+    expect(r.receiptRoot).toBe('0xreceipt');
+    expect(r.checksumProofs).toEqual([[0, ['0xproof0a', '0xproof0b']], [1, ['0xproof1a']]]);
+    // Should NOT have a transactions field — upstream returns header only
+    expect(r.transactions).toBeUndefined();
+  });
+
+  it('unknown block returns null', async () => {
+    const { body } = await rpc(url, 'btc_getBlockByNumber', [999999]);
+    expect(body.result).toBeNull();
+  });
+
+  it('hex block number is parsed', async () => {
+    const hex = '0x' + (941400).toString(16);
+    const { body } = await rpc(url, 'btc_getBlockByNumber', [hex]);
+    expect(body.result.height).toBe('941400');
+  });
+
+  it('missing params → -32602', async () => {
+    const { body } = await rpc(url, 'btc_getBlockByNumber');
+    expect(body.error.code).toBe(-32602);
+  });
+});
+
+describe('btc_getBlockByHash (archival)', () => {
+  let url: string;
+  let close: () => Promise<void>;
+  let db: DbAdapter;
+
+  beforeAll(async () => {
+    db = createTestDb();
+    await seedArchivalBlock(db, 941500, 'hash_941500');
+    ({ url, close } = await startTestServer(db));
+  });
+  afterAll(() => close());
+
+  it('returns the same upstream shape by hash', async () => {
+    const { body } = await rpc(url, 'btc_getBlockByHash', ['hash_941500']);
+    expect(body.result.height).toBe('941500');
+    expect(body.result.hash).toBe('hash_941500');
+    expect(body.result.checksumProofs).toBeDefined();
+  });
+
+  it('unknown hash returns null', async () => {
+    const { body } = await rpc(url, 'btc_getBlockByHash', ['nope']);
+    expect(body.result).toBeNull();
+  });
+});
+
+describe('btc_getTransactionReceipt (archival)', () => {
+  let url: string;
+  let close: () => Promise<void>;
+  let db: DbAdapter;
+
+  beforeAll(async () => {
+    db = createTestDb();
+    // Successful tx with receipt + proofs + an event
+    await db.run(
+      `INSERT OR IGNORE INTO transactions
+         (tx_hash, block_number, tx_index, tx_type, from_address, contract_address,
+          gas_used, special_gas_used, burned_bitcoin, priority_fee, failed, revert_reason,
+          receipt, receipt_proofs, created_at)
+       VALUES ('txArchOk', 300, 0, 'interaction', 'bc1qf', 'bc1qc',
+               '554155299', '0', '100', '10000', 0, NULL,
+               x'deadbeef', ?, 1700000000)`,
+      [JSON.stringify(['0xproof1', '0xproof2'])],
+    );
+    // Failed tx
+    await db.run(
+      `INSERT OR IGNORE INTO transactions
+         (tx_hash, block_number, tx_index, tx_type, from_address, contract_address,
+          gas_used, special_gas_used, burned_bitcoin, priority_fee, failed, revert_reason, created_at)
+       VALUES ('txArchFail', 300, 1, 'interaction', 'bc1qf', 'bc1qc',
+               '1000', '0', '10', '100', 1, 'out of gas', 1700000000)`,
+    );
+    await insertEventsBatch(db, [
+      { blockNumber: 300, txHash: 'txArchOk', contractAddress: '0xabc', eventName: 'Minted', rawData: Buffer.from('aabb', 'hex') },
+    ]);
+    ({ url, close } = await startTestServer(db));
+  });
+  afterAll(() => close());
+
+  it('returns upstream ITransactionReceipt shape: receipt/receiptProofs/events/gasUsed/specialGasUsed', async () => {
+    const { body } = await rpc(url, 'btc_getTransactionReceipt', ['txArchOk']);
+    const r = body.result;
+    // receipt: base64 of the raw bytes stored as BLOB
+    expect(r.receipt).toBe(Buffer.from('deadbeef', 'hex').toString('base64'));
+    expect(r.receiptProofs).toEqual(['0xproof1', '0xproof2']);
+    expect(r.gasUsed).toBe('0x2107bd23'); // 554155299 → 0x2107bd23
+    expect(r.specialGasUsed).toBe('0x0');
+    expect(r.revert).toBeUndefined(); // successful tx, no revert field
+    expect(r.events).toHaveLength(1);
+    expect(r.events[0].contractAddress).toBe('0xabc');
+    expect(r.events[0].type).toBe('Minted');
+    // data is base64-encoded raw bytes
+    expect(r.events[0].data).toBe(Buffer.from('aabb', 'hex').toString('base64'));
+  });
+
+  it('failed tx surfaces revert reason', async () => {
+    const { body } = await rpc(url, 'btc_getTransactionReceipt', ['txArchFail']);
+    expect(body.result.revert).toBe('out of gas');
+    expect(body.result.gasUsed).toBe('0x3e8'); // 1000 → 0x3e8
+  });
+
+  it('empty receipt_proofs stores as empty array in response', async () => {
+    const db2 = createTestDb();
+    await db2.run(
+      `INSERT INTO transactions (tx_hash, block_number, tx_index, tx_type, failed, created_at)
+       VALUES ('txEmpty', 1, 0, 'interaction', 0, 1700000000)`,
+    );
+    const { url: url2, close: close2 } = await startTestServer(db2);
+    try {
+      const { body } = await rpc(url2, 'btc_getTransactionReceipt', ['txEmpty']);
+      expect(body.result.receipt).toBe('');
+      expect(body.result.receiptProofs).toEqual([]);
+      expect(body.result.events).toEqual([]);
+    } finally {
+      await close2();
+    }
+  });
+
+  it('unknown hash returns null', async () => {
+    const { body } = await rpc(url, 'btc_getTransactionReceipt', ['0xdoesnotexist']);
+    expect(body.result).toBeNull();
+  });
+
+  it('btc_* archival handler does NOT consult the upstream proxy', async () => {
+    const mockFetch = vi.fn();
+    vi.stubGlobal('fetch', mockFetch);
+    try {
+      await nodePost(url, { jsonrpc: '2.0', id: 1, method: 'btc_getTransactionReceipt', params: ['txArchOk'] });
+      expect(mockFetch).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
 describe('startRpcServer / stopRpcServer lifecycle', () => {
   afterEach(() => {
     stopRpcServer();

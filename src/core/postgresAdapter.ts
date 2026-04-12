@@ -19,11 +19,28 @@ import type { DbAdapter } from './dbAdapter.js';
 
 export const POSTGRES_SCHEMA = `
 CREATE TABLE IF NOT EXISTS blocks (
-  block_number BIGINT PRIMARY KEY,
-  block_hash   TEXT NOT NULL,
-  timestamp    BIGINT,
-  tx_count       INTEGER,
-  opnet_tx_count INTEGER NOT NULL DEFAULT 0
+  block_number            BIGINT PRIMARY KEY,
+  block_hash              TEXT NOT NULL,
+  timestamp               BIGINT,
+  tx_count                INTEGER,
+  opnet_tx_count          INTEGER NOT NULL DEFAULT 0,
+  previous_block_hash     TEXT,
+  previous_block_checksum TEXT,
+  bits                    TEXT,
+  nonce                   BIGINT,
+  version                 BIGINT,
+  size                    BIGINT,
+  weight                  BIGINT,
+  stripped_size           BIGINT,
+  median_time             BIGINT,
+  checksum_root           TEXT,
+  merkle_root             TEXT,
+  storage_root            TEXT,
+  receipt_root            TEXT,
+  ema                     TEXT,
+  base_gas                TEXT,
+  block_gas_used          TEXT,
+  checksum_proofs         TEXT
 );
 
 CREATE TABLE IF NOT EXISTS transactions (
@@ -43,6 +60,8 @@ CREATE TABLE IF NOT EXISTS transactions (
   calldata             BYTEA,
   calldata_length      INTEGER,
   sender_pub_key_hash  TEXT,
+  receipt              BYTEA,
+  receipt_proofs       TEXT,
   created_at           BIGINT NOT NULL DEFAULT extract(epoch from now())::bigint
 );
 

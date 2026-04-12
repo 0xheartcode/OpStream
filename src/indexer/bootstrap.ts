@@ -22,6 +22,14 @@ export interface BootstrapOptions {
   chunkSize?: number;
   /** Override start block (ignores checkpoint). Default: use checkpoint. */
   fromBlock?: bigint;
+  /**
+   * Cap the scan at this block (inclusive). Default: chain tip.
+   *
+   * Enables deterministic bounded test runs: with fromBlock=X, toBlock=X+N
+   * the loop scans exactly N+1 blocks regardless of the live tip. Clamped
+   * to the chain tip if it exceeds it. Throws if toBlock < startBlock.
+   */
+  toBlock?: bigint;
 }
 
 export interface BootstrapResult {
@@ -125,6 +133,7 @@ export async function runBootstrapCore(
 ): Promise<BootstrapResult> {
   const chunkSize = BigInt(opts?.chunkSize ?? 500);
   const fromBlockOverride = opts?.fromBlock ?? 0n;
+  const toBlockCap = opts?.toBlock ?? 0n;
   const rps = bootstrapRps ?? 10;
   const minIntervalMs = rps > 0 ? Math.floor(1000 / rps) : 0;
 
@@ -133,10 +142,24 @@ export async function runBootstrapCore(
   const checkpoint = await getCheckpoint(db);
   const startBlock = fromBlockOverride > 0n ? fromBlockOverride : checkpoint + 1n;
 
-  const totalRange = Number(currentBlock - startBlock + 1n);
+  // Cap at toBlock if set, otherwise scan to chain tip.
+  // toBlockCap is clamped to currentBlock so requesting a future block
+  // just stops at the tip.
+  const endBlockInclusive = toBlockCap > 0n
+    ? (toBlockCap < currentBlock ? toBlockCap : currentBlock)
+    : currentBlock;
 
-  if (startBlock > currentBlock) {
-    log('INFO', 'bootstrap', `Synced  checkpoint=${Number(checkpoint)}  chain tip=${Number(currentBlock)}  -- up to date`);
+  if (toBlockCap > 0n && toBlockCap < startBlock) {
+    throw new Error(
+      `BOOTSTRAP_TO_BLOCK (${toBlockCap}) is less than start block (${startBlock}). ` +
+      `Set BOOTSTRAP_TO_BLOCK >= BOOTSTRAP_FROM_BLOCK, or unset it to scan to chain tip.`,
+    );
+  }
+
+  const totalRange = Number(endBlockInclusive - startBlock + 1n);
+
+  if (startBlock > endBlockInclusive) {
+    log('INFO', 'bootstrap', `Synced  checkpoint=${Number(checkpoint)}  target=${Number(endBlockInclusive)}  -- up to date`);
     return { blocksScanned: 0, eventsStored: 0 };
   }
 
@@ -144,6 +167,7 @@ export async function runBootstrapCore(
   log('INFO', 'bootstrap', `  OpStream Bootstrap`);
   log('INFO', 'bootstrap', `  Chain tip:      ${Number(currentBlock)}`);
   log('INFO', 'bootstrap', `  Start block:    ${Number(startBlock)}`);
+  log('INFO', 'bootstrap', `  End block:      ${Number(endBlockInclusive)}${toBlockCap > 0n ? ' (capped)' : ''}`);
   log('INFO', 'bootstrap', `  Blocks to scan: ${totalRange}`);
   log('INFO', 'bootstrap', `  Rate limit:     ${rps} req/s`);
   log('INFO', 'bootstrap', '');
@@ -155,10 +179,10 @@ export async function runBootstrapCore(
   // Two-line rewriting display on TTY; falls back to log() in scanner when null
   const display = createProgressDisplay(Number(startBlock), totalRange);
 
-  for (let chunkStart = startBlock; chunkStart <= currentBlock; chunkStart += chunkSize) {
-    const chunkEnd = chunkStart + chunkSize - 1n <= currentBlock
+  for (let chunkStart = startBlock; chunkStart <= endBlockInclusive; chunkStart += chunkSize) {
+    const chunkEnd = chunkStart + chunkSize - 1n <= endBlockInclusive
       ? chunkStart + chunkSize - 1n
-      : currentBlock;
+      : endBlockInclusive;
 
     const chunkStartOffset = Number(chunkStart - startBlock);
 
@@ -210,6 +234,7 @@ export async function runBootstrap(): Promise<void> {
     {
       chunkSize: config.bootstrapChunkSize,
       fromBlock: config.bootstrapFromBlock,
+      toBlock:   config.bootstrapToBlock,
     },
     config.bootstrapRps,
   );

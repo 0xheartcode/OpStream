@@ -29,6 +29,9 @@ export interface OpStreamConfig {
   bootstrapRps: number;
   bootstrapChunkSize: number;
   bootstrapFromBlock: bigint;
+  // 0n = unset — scan to current chain tip. When set, bootstrap stops at this
+  // block (inclusive), enabling deterministic bounded test runs.
+  bootstrapToBlock: bigint;
 
   // Metrics emission interval (s)
   metricsIntervalSeconds: number;
@@ -75,6 +78,7 @@ export function loadConfig(): OpStreamConfig {
     bootstrapRps:        parseInt10(process.env['BOOTSTRAP_RPS'], 10),
     bootstrapChunkSize:  parseInt10(process.env['BOOTSTRAP_CHUNK_SIZE'], 500),
     bootstrapFromBlock:  parseBigInt(process.env['BOOTSTRAP_FROM_BLOCK'], 941400n),
+    bootstrapToBlock:    parseBigInt(process.env['BOOTSTRAP_TO_BLOCK'], 0n),
     metricsIntervalSeconds: parseInt10(process.env['METRICS_INTERVAL_SECONDS'], 60),
     wsPort:  parseInt10(process.env['WS_PORT'],  0),
     rpcPort: parseInt10(process.env['RPC_PORT'], 0),

@@ -206,8 +206,8 @@ Pool discovery logic (`processNativeSwapPools`, `processMotoswapPools`, etc.) wa
 
 | Table | Purpose |
 |-------|---------|
-| `blocks` | Block metadata — hash, timestamp, `tx_count` (raw Bitcoin block size, matches upstream `btc_getBlockByNumber`), `opnet_tx_count` (OPNET-relevant txs we persisted) |
-| `transactions` | OPNET-relevant txs — sender, gas, fees, calldata, revert status. Non-OPNET Bitcoin txs are skipped by default (see `OPSTREAM_STORE_GENERIC_TXS`). |
+| `blocks` | Full archival block metadata — hash, timestamp, `tx_count` (raw Bitcoin block size), `opnet_tx_count` (OPNET txs we persisted), plus every `IBlockCommon` field needed to serve `btc_getBlockByNumber` / `btc_getBlockByHash` locally with the exact upstream shape (`previous_block_hash`, `previous_block_checksum`, `bits`, `nonce`, `version`, `size`, `weight`, `stripped_size`, `median_time`, `checksum_root`, `merkle_root`, `storage_root`, `receipt_root`, `ema`, `base_gas`, `block_gas_used`, `checksum_proofs`). |
+| `transactions` | OPNET-relevant txs — sender, gas, fees, calldata, revert status, plus `receipt` + `receipt_proofs` for `btc_getTransactionReceipt` archival parity. Non-OPNET Bitcoin txs are skipped by default (see `OPSTREAM_STORE_GENERIC_TXS`). |
 | `tx_outputs` | Bitcoin UTXO outputs per tx — value flows in satoshis |
 | `events` | Every decoded event from every contract |
 | `scan_checkpoints` | Scanner progress (resumable) |
@@ -241,6 +241,8 @@ Every stored transaction exposes these fields via the OPNET SDK — OpStream sto
 | `calldata` | Raw bytes sent to the contract (interaction txs only) |
 | `calldata_length` | Byte count — check before fetching the BLOB |
 | `sender_pub_key_hash` | Bitcoin-native sender identity (hex) |
+| `receipt` | Raw receipt bytes from `ITransactionReceipt.receipt` (archival, BLOB) |
+| `receipt_proofs` | Receipt merkle proofs, JSON array of hex strings (archival) |
 
 ### What the `tx_outputs` table captures
 

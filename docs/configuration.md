@@ -9,6 +9,29 @@ cp .env.example .env
 
 ---
 
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `start` | Bootstrap + live — catch up to chain tip (or `BOOTSTRAP_TO_BLOCK` when set), then follow it continuously. **Recommended for most deployments.** |
+| `bootstrap` | Full scan from `BOOTSTRAP_FROM_BLOCK` to chain tip (or `BOOTSTRAP_TO_BLOCK`). Checkpoint-resumable — exits when done. |
+| `live` | Follow the chain tip only. Assumes the DB is already caught up; resumes from the last checkpoint. Do not use for a cold start — there's no checkpoint yet and it would try to scan from block 0. |
+| `reset [--yes]` | Truncate every scanned table (`events`, `transactions`, `tx_outputs`, `blocks`, `contract_deployments`, `scan_checkpoints`, `mempool_pending`). **Destructive** — prompts for interactive confirmation unless `--yes` or the `FORCE=1` env var is set. Preserves `tokens`, `runtime_metrics`, and `error_log`. Use before a fresh archival bootstrap if the DB was scanned before the archival schema additions. |
+
+```bash
+# Cold start from scratch
+npx tsx src/main.ts start
+
+# Bounded 100-block test run (fast, deterministic)
+BOOTSTRAP_FROM_BLOCK=941400 BOOTSTRAP_TO_BLOCK=941499 npx tsx src/main.ts bootstrap
+
+# Nuke the DB and start over
+npx tsx src/main.ts reset --yes
+npx tsx src/main.ts start
+```
+
+---
+
 ## Variables
 
 ### Database
@@ -33,13 +56,16 @@ When unset, OpStream behaves exactly as before — indexer mode, no mempool scan
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OPNET_RPC_URL` | `https://mainnet.opnet.org` | OPNET JSON-RPC endpoint. Point this at a local node for production workloads. |
+| `OPNET_RPC_URL` | `https://mainnet.opnet.org` | Upstream OPNET JSON-RPC endpoint. Both the scanner (when pulling blocks) and the built-in RPC server (when proxying unsupported methods) use this. Accepts either a bare hostname (`https://mainnet.opnet.org`) or a fully-qualified path (`https://mainnet.opnet.org/api/v1/json-rpc`) — OpStream appends `/api/v1/json-rpc` if it's missing, mirroring the opnet SDK's `JSONRpcProvider.providerUrl()` behavior. |
+| `RPC_PORT` | `0` (disabled) | TCP port for OpStream's own JSON-RPC 2.0 HTTP server. Set to e.g. `3001` to expose it. When enabled, any opnet-SDK client pointed at `http://localhost:3001` gets transparent speedup: methods served locally from the archival index (`btc_getBlockByNumber`, `btc_getBlockByHash`, `btc_getTransactionReceipt`) answer in sub-milliseconds; everything else proxies to `OPNET_RPC_URL`. The `opstream_*` extension namespace (`opstream_getLogs`, etc.) is only reachable through this endpoint. |
 | `BITCOIN_RPC_URL` | *(unset)* | Bitcoin Core RPC URL. **Required** when `OPSTREAM_MODE` is `mempool` or `full`. Example: `http://user:pass@localhost:8332` |
 | `BITCOIN_RPC_USER` | *(unset)* | Bitcoin Core RPC username (fallback if not embedded in URL). |
 | `BITCOIN_RPC_PASS` | *(unset)* | Bitcoin Core RPC password (fallback if not embedded in URL). |
 
 The OPNET RPC client has a built-in 5 s timeout per call, exponential backoff on failure (1 s → 2 s → 4 s),
 and a circuit breaker that pauses after 3 consecutive failures.
+
+OpStream's own RPC server is a **strict-namespace gateway**: `btc_*` is the OPNET RPC surface (served locally where possible, proxied otherwise), `opstream_*` is the extension surface for queries upstream doesn't support (indexed event lookups, bytecode hash queries, rich block+txs+events responses). See [the README's JSON-RPC section](../README.md#json-rpc-20-server) for the method-by-method breakdown.
 
 ### Mempool
 
@@ -56,11 +82,25 @@ Bitcoin transactions are discarded in memory.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `BOOTSTRAP_FROM_BLOCK` | `941400` | Block to start scanning from. OPNET's first block with on-chain activity. |
+| `BOOTSTRAP_TO_BLOCK` | *(unset)* | Stop block (inclusive). Unset scans to chain tip; setting it enables **bounded, deterministic test runs**. `BOOTSTRAP_FROM_BLOCK=941400 BOOTSTRAP_TO_BLOCK=941499` scans exactly 100 blocks regardless of where the live tip is. Clamped to the chain tip if it exceeds it; throws if less than `BOOTSTRAP_FROM_BLOCK`. |
 | `BOOTSTRAP_RPS` | `10` | Rate limit in RPC requests per second during bootstrap. Lower this if the node is rate-limiting you. |
 | `BOOTSTRAP_CHUNK_SIZE` | `500` | Blocks scanned per DB transaction. Smaller = more frequent checkpoints but slower overall. |
+| `OPSTREAM_STORE_GENERIC_TXS` | `false` | Store non-OPNET Bitcoin transactions (plain BTC payments, coinbase, etc.) alongside OPNET interactions and deployments. Off by default — in typical OPNET blocks generics are ~95% of rows (~3,400 of 3,450) and nothing in the query surface uses them, so persisting them bloats the DB ~10× for no practical gain. Set to `true` for a full Bitcoin archive. Events and contract deployments are unaffected either way. |
 
 Bootstrap is checkpoint-resumable. If it crashes, the next run picks up from the last saved
 checkpoint — at most one chunk is re-scanned (idempotent due to `ON CONFLICT DO NOTHING`).
+
+#### Generic vs OPNET txs: what gets stored
+
+OPNET blocks are Bitcoin blocks. When OpStream's scanner fetches a block from the OPNET node, the response contains **every Bitcoin transaction in that block**, each tagged by the opnet SDK with an `OPNetType`:
+
+| Type | What it is | Stored by default? |
+|---|---|---|
+| `Interaction` | OPNET contract call (calldata, gas, events) | ✅ yes |
+| `Deployment` | New OPNET contract deployment | ✅ yes |
+| `Generic` | Plain Bitcoin transaction (no OPNET payload) | ❌ no (unless `OPSTREAM_STORE_GENERIC_TXS=true`) |
+
+Classification happens regardless of the flag — `blocks.tx_count` always records the raw Bitcoin block size and `blocks.opnet_tx_count` records how many OPNET-relevant txs were persisted, so you can measure the difference without storing everything.
 
 ### Real-Time Push
 
@@ -99,8 +139,13 @@ DB_PATH=data/opstream.db
 
 # Bootstrap
 BOOTSTRAP_FROM_BLOCK=941400
+# BOOTSTRAP_TO_BLOCK=941499       # uncomment for bounded test runs
 BOOTSTRAP_RPS=10
 BOOTSTRAP_CHUNK_SIZE=500
+# OPSTREAM_STORE_GENERIC_TXS=true # uncomment for full Bitcoin archive (~10x disk)
+
+# JSON-RPC 2.0 HTTP server (optional)
+# RPC_PORT=3001
 
 # Mempool
 # MEMPOOL_POLL_INTERVAL_MS=10000

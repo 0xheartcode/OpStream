@@ -171,14 +171,38 @@ const received = await db.get(
 
 ### `blocks`
 
+Every block-level field returned by the upstream `btc_getBlockByNumber` response is stored here, so the RPC server can serve an exact upstream-shape response locally (archival parity). Scalar header fields come from the opnet SDK's `IBlockCommon` interface; `checksum_proofs` is serialized as JSON text.
+
 | Column | Type | Description |
 |--------|------|-------------|
 | `block_number` | INTEGER PK | Block height |
 | `block_hash` | TEXT | Block hash |
-| `timestamp` | INTEGER | Unix timestamp |
-| `tx_count` | INTEGER | Number of transactions |
+| `timestamp` | INTEGER | Block time (unix ms, as returned by the OPNET node) |
+| `tx_count` | INTEGER | **Raw Bitcoin block size** — every tx in the block, OPNET or not. Matches upstream's `txCount` field. |
+| `opnet_tx_count` | INTEGER | **OPStream-local metric**: count of OPNET-relevant txs actually persisted (`interaction` + `deployment`). With `OPSTREAM_STORE_GENERIC_TXS=false` (default) this is typically ~5% of `tx_count`. |
+| `previous_block_hash` | TEXT | Previous block's hash (archival) |
+| `previous_block_checksum` | TEXT | Previous block's OPNET checksum (archival) |
+| `bits` | TEXT | Bitcoin difficulty bits (archival) |
+| `nonce` | INTEGER | Bitcoin block nonce (archival) |
+| `version` | INTEGER | Block version (archival) |
+| `size` | INTEGER | Block size in bytes (archival) |
+| `weight` | INTEGER | Block weight (archival) |
+| `stripped_size` | INTEGER | Block stripped size (archival) |
+| `median_time` | INTEGER | Median time past (archival) |
+| `checksum_root` | TEXT | OPNET checksum root (archival) |
+| `merkle_root` | TEXT | Bitcoin merkle root (archival) |
+| `storage_root` | TEXT | OPNET storage root — contract state commitment (archival) |
+| `receipt_root` | TEXT | OPNET receipt root — tx receipt merkle tree (archival) |
+| `ema` | TEXT | EMA gas price (archival, bigint as decimal string) |
+| `base_gas` | TEXT | Base gas price (archival, bigint as decimal string) |
+| `block_gas_used` | TEXT | **Block-level** gas used (archival, bigint as decimal string). Distinct from per-tx `gas_used` on the `transactions` table. |
+| `checksum_proofs` | TEXT | `IBlockCommon.checksumProofs` serialized as JSON — an array of `[txIndex, proofHashes[]]` pairs |
+
+The archival columns were added in a later commit. Rows scanned with an earlier OpStream version will have `NULL` for them until the block is rescanned (run `reset --yes` and re-bootstrap).
 
 ### `transactions`
+
+Holds one row per **OPNET-relevant** transaction (`interaction` + `deployment`). Non-OPNET Bitcoin transactions in the same block are skipped by default — set `OPSTREAM_STORE_GENERIC_TXS=true` and rescan to keep them. See [configuration.md#generic-vs-opnet-txs-what-gets-stored](./configuration.md#generic-vs-opnet-txs-what-gets-stored).
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -198,9 +222,13 @@ const received = await db.get(
 | `calldata` | BLOB | Raw calldata for interaction txs |
 | `calldata_length` | INTEGER | Byte count of calldata |
 | `sender_pub_key_hash` | TEXT | Bitcoin-native sender identity (hex) |
+| `receipt` | BLOB | `ITransactionReceipt.receipt` raw bytes (archival). Used by `btc_getTransactionReceipt` to return the exact upstream shape. |
+| `receipt_proofs` | TEXT | `ITransactionReceipt.receiptProofs` serialized as a JSON array of hex strings (archival) |
 
 Gas and fee columns are stored as decimal strings because the on-chain values are
-`bigint` and SQLite has no native 64-bit unsigned integer type.
+`bigint` and SQLite has no native 64-bit unsigned integer type. The RPC server converts them back to the `"0x…"` hex form used by upstream responses when answering `btc_getTransactionReceipt`.
+
+The `receipt` and `receipt_proofs` columns were added with the archival commit. Rows scanned earlier have `NULL` for both until rescanned.
 
 ### `events`
 

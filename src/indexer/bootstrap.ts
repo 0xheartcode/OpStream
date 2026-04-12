@@ -227,17 +227,25 @@ export async function runBootstrap(): Promise<void> {
   const db = openDb(config.dbPath);
   const client = new OpnetRpcClient(config.opnetRpcUrl);
 
+  // BOOTSTRAP_FROM_BLOCK is a floor for cold starts only: if a checkpoint
+  // already exists we resume from it, so `start` is always idempotent and
+  // never re-scans blocks that were already indexed.
+  const checkpoint = await getCheckpoint(db);
+  const effectiveFromBlock = checkpoint > 0n ? 0n : config.bootstrapFromBlock;
+
   log('INFO', 'bootstrap', 'Bootstrap starting', {
     dbPath: config.dbPath,
     chunkSize: config.bootstrapChunkSize,
-    fromBlock: Number(config.bootstrapFromBlock),
+    fromBlock: Number(effectiveFromBlock),
+    checkpoint: Number(checkpoint),
+    resuming: checkpoint > 0n,
   });
 
   const result = await runBootstrapCore(
     db, client,
     {
       chunkSize:       config.bootstrapChunkSize,
-      fromBlock:       config.bootstrapFromBlock,
+      fromBlock:       effectiveFromBlock,
       toBlock:         config.bootstrapToBlock,
       storeGenericTxs: config.storeGenericTxs,
     },

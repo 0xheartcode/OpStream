@@ -143,9 +143,11 @@ export function startLiveIndexer(
   const onEvent           = opts?.onEvent;
   const storeGenericTxs   = opts?.storeGenericTxs ?? false;
 
+  const syncedLogIntervalMs = 10 * 60_000;
   let running = true;
   let lastPollAt = 0;
   let lastIndexedBlock = 0; // updated on first poll from getCheckpoint()
+  let lastSyncedLogAt = 0;
   let timer: ReturnType<typeof setTimeout> | null = null;
 
   let _resolveStop: (() => void) | null = null;
@@ -183,7 +185,11 @@ export function startLiveIndexer(
       }
 
       if (fromBlock > currentBlock) {
-        log('INFO', 'live', `Synced  block=${Number(currentBlock)}  waiting for new blocks...`);
+        const now = Date.now();
+        if (now - lastSyncedLogAt >= syncedLogIntervalMs) {
+          log('INFO', 'live', `Synced  block=${Number(currentBlock)}  waiting for new blocks...`);
+          lastSyncedLogAt = now;
+        }
       } else {
         const blocksAhead = Number(toBlock - fromBlock + 1n);
         log('INFO', 'live', `New blocks  ${Number(fromBlock)}..${Number(toBlock)} (+${blocksAhead})`);

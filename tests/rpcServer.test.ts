@@ -59,7 +59,7 @@ function nodePost(url: string, body: unknown): Promise<{ status: number; body: u
   });
 }
 
-/** Seed a scan_checkpoints row so btc_blockNumber / "latest" resolution works. */
+/** Seed a scan_checkpoints row so opstream_blockNumber / "latest" resolution works. */
 async function seedCheckpoint(db: DbAdapter, lastBlock: number): Promise<void> {
   await db.run(
     "INSERT OR REPLACE INTO scan_checkpoints (scan_type, last_block, updated_at) VALUES ('indexer', ?, ?)",
@@ -138,7 +138,7 @@ describe('RPC server — HTTP basics', () => {
   });
 
   it('response always has Content-Type: application/json', async () => {
-    const { headers } = await rpc(url, 'btc_blockNumber', []);
+    const { headers } = await rpc(url, 'opstream_blockNumber', []);
     expect(headers.get('content-type')).toContain('application/json');
   });
 });
@@ -203,7 +203,7 @@ describe('RPC server — invalid request', () => {
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: 1, method: 'btc_blockNumber' }),
+      body: JSON.stringify({ id: 1, method: 'opstream_blockNumber' }),
     });
     const body = await res.json() as { error: { code: number } };
     expect(body.error.code).toBe(-32600);
@@ -213,7 +213,7 @@ describe('RPC server — invalid request', () => {
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '1.0', id: 1, method: 'btc_blockNumber' }),
+      body: JSON.stringify({ jsonrpc: '1.0', id: 1, method: 'opstream_blockNumber' }),
     });
     const body = await res.json() as { error: { code: number } };
     expect(body.error.code).toBe(-32600);
@@ -230,7 +230,7 @@ describe('RPC server — invalid request', () => {
   });
 });
 
-describe('btc_blockNumber', () => {
+describe('opstream_blockNumber', () => {
   let url: string;
   let close: () => Promise<void>;
   let db: DbAdapter;
@@ -243,28 +243,28 @@ describe('btc_blockNumber', () => {
   afterAll(() => close());
 
   it('returns 0x0 when no checkpoint exists', async () => {
-    const { body } = await rpc(url, 'btc_blockNumber', []);
+    const { body } = await rpc(url, 'opstream_blockNumber', []);
     expect(body.result).toBe('0x0');
   });
 
   it('returns hex block number from checkpoint', async () => {
     await seedCheckpoint(db, 100);
-    const { body } = await rpc(url, 'btc_blockNumber', []);
+    const { body } = await rpc(url, 'opstream_blockNumber', []);
     expect(body.result).toBe('0x64'); // 100 decimal
   });
 
   it('echoes the request id', async () => {
-    const { body } = await rpc(url, 'btc_blockNumber', [], 42);
+    const { body } = await rpc(url, 'opstream_blockNumber', [], 42);
     expect(body.id).toBe(42);
   });
 
   it('echoes string ids', async () => {
-    const { body } = await rpc(url, 'btc_blockNumber', [], 'req-abc');
+    const { body } = await rpc(url, 'opstream_blockNumber', [], 'req-abc');
     expect(body.id).toBe('req-abc');
   });
 });
 
-describe('btc_getLogs', () => {
+describe('opstream_getLogs', () => {
   let url: string;
   let close: () => Promise<void>;
   let db: DbAdapter;
@@ -287,12 +287,12 @@ describe('btc_getLogs', () => {
   afterAll(() => close());
 
   it('no filter returns all 4 events', async () => {
-    const { body } = await rpc(url, 'btc_getLogs', [{}]);
+    const { body } = await rpc(url, 'opstream_getLogs', [{}]);
     expect(body.result).toHaveLength(4);
   });
 
   it('filter by address', async () => {
-    const { body } = await rpc(url, 'btc_getLogs', [{ address: 'bc1qa' }]);
+    const { body } = await rpc(url, 'opstream_getLogs', [{ address: 'bc1qa' }]);
     expect(body.result).toHaveLength(2);
     for (const log of body.result) {
       expect(log.address).toBe('bc1qa');
@@ -300,7 +300,7 @@ describe('btc_getLogs', () => {
   });
 
   it('filter by eventName', async () => {
-    const { body } = await rpc(url, 'btc_getLogs', [{ eventName: 'Swap' }]);
+    const { body } = await rpc(url, 'opstream_getLogs', [{ eventName: 'Swap' }]);
     expect(body.result).toHaveLength(2);
     for (const log of body.result) {
       expect(log.topics[0]).toBe('Swap');
@@ -308,19 +308,19 @@ describe('btc_getLogs', () => {
   });
 
   it('filter by fromBlock + toBlock', async () => {
-    const { body } = await rpc(url, 'btc_getLogs', [{ fromBlock: 100, toBlock: 200 }]);
+    const { body } = await rpc(url, 'opstream_getLogs', [{ fromBlock: 100, toBlock: 200 }]);
     expect(body.result).toHaveLength(3);
   });
 
   it('filter by combined address + eventName', async () => {
-    const { body } = await rpc(url, 'btc_getLogs', [{ address: 'bc1qa', eventName: 'Swap' }]);
+    const { body } = await rpc(url, 'opstream_getLogs', [{ address: 'bc1qa', eventName: 'Swap' }]);
     expect(body.result).toHaveLength(1);
     expect(body.result[0].address).toBe('bc1qa');
     expect(body.result[0].topics[0]).toBe('Swap');
   });
 
   it('returned log has correct shape', async () => {
-    const { body } = await rpc(url, 'btc_getLogs', [{ address: 'bc1qa', eventName: 'Swap' }]);
+    const { body } = await rpc(url, 'opstream_getLogs', [{ address: 'bc1qa', eventName: 'Swap' }]);
     const log = body.result[0];
     expect(typeof log.address).toBe('string');
     expect(Array.isArray(log.topics)).toBe(true);
@@ -331,7 +331,7 @@ describe('btc_getLogs', () => {
   });
 
   it('"latest" resolves to checkpoint block', async () => {
-    const { body } = await rpc(url, 'btc_getLogs', [{ fromBlock: 'latest', toBlock: 'latest' }]);
+    const { body } = await rpc(url, 'opstream_getLogs', [{ fromBlock: 'latest', toBlock: 'latest' }]);
     // No events at block 500, result should be empty (not an error)
     expect(Array.isArray(body.result)).toBe(true);
     expect(body.error).toBeUndefined();
@@ -339,27 +339,27 @@ describe('btc_getLogs', () => {
 
   it('hex fromBlock string is parsed correctly', async () => {
     // 0x64 = 100
-    const { body } = await rpc(url, 'btc_getLogs', [{ fromBlock: '0x64', toBlock: '0x64' }]);
+    const { body } = await rpc(url, 'opstream_getLogs', [{ fromBlock: '0x64', toBlock: '0x64' }]);
     expect(body.result).toHaveLength(2); // two events at block 100
   });
 
   it('missing params → -32602', async () => {
-    const { body } = await rpc(url, 'btc_getLogs');
+    const { body } = await rpc(url, 'opstream_getLogs');
     expect(body.error.code).toBe(-32602);
   });
 
   it('empty params array → -32602', async () => {
-    const { body } = await rpc(url, 'btc_getLogs', []);
+    const { body } = await rpc(url, 'opstream_getLogs', []);
     expect(body.error.code).toBe(-32602);
   });
 
   it('null filter → -32602', async () => {
-    const { body } = await rpc(url, 'btc_getLogs', [null]);
+    const { body } = await rpc(url, 'opstream_getLogs', [null]);
     expect(body.error.code).toBe(-32602);
   });
 });
 
-describe('btc_getBlockReceipts', () => {
+describe('opstream_getBlockReceipts', () => {
   let url: string;
   let close: () => Promise<void>;
   let db: DbAdapter;
@@ -380,12 +380,12 @@ describe('btc_getBlockReceipts', () => {
   afterAll(() => close());
 
   it('unknown block returns null', async () => {
-    const { body } = await rpc(url, 'btc_getBlockReceipts', [999999]);
+    const { body } = await rpc(url, 'opstream_getBlockReceipts', [999999]);
     expect(body.result).toBeNull();
   });
 
   it('known block returns correct shape', async () => {
-    const { body } = await rpc(url, 'btc_getBlockReceipts', [941400]);
+    const { body } = await rpc(url, 'opstream_getBlockReceipts', [941400]);
     const result = body.result;
     expect(result.block_number).toBe(941400);
     expect(result.block_hash).toBe('blockhash_941400');
@@ -393,14 +393,14 @@ describe('btc_getBlockReceipts', () => {
   });
 
   it('transactions are ordered by tx_index', async () => {
-    const { body } = await rpc(url, 'btc_getBlockReceipts', [941400]);
+    const { body } = await rpc(url, 'opstream_getBlockReceipts', [941400]);
     const txs = body.result.transactions as Array<{ tx_hash: string }>;
     expect(txs[0]!.tx_hash).toBe('txA');
     expect(txs[1]!.tx_hash).toBe('txB');
   });
 
   it('events nested under correct transaction', async () => {
-    const { body } = await rpc(url, 'btc_getBlockReceipts', [941400]);
+    const { body } = await rpc(url, 'opstream_getBlockReceipts', [941400]);
     const txA = (body.result.transactions as Array<{ tx_hash: string; events: unknown[] }>)
       .find((t) => t.tx_hash === 'txA')!;
     expect(txA.events).toHaveLength(1);
@@ -409,18 +409,18 @@ describe('btc_getBlockReceipts', () => {
 
   it('"latest" resolves via checkpoint', async () => {
     // Checkpoint is 500, no block at 500 → null
-    const { body } = await rpc(url, 'btc_getBlockReceipts', ['latest']);
+    const { body } = await rpc(url, 'opstream_getBlockReceipts', ['latest']);
     expect(body.result).toBeNull();
     expect(body.error).toBeUndefined();
   });
 
   it('missing params → -32602', async () => {
-    const { body } = await rpc(url, 'btc_getBlockReceipts');
+    const { body } = await rpc(url, 'opstream_getBlockReceipts');
     expect(body.error.code).toBe(-32602);
   });
 });
 
-describe('btc_getTransaction', () => {
+describe('opstream_getTransaction', () => {
   let url: string;
   let close: () => Promise<void>;
   let db: DbAdapter;
@@ -437,30 +437,30 @@ describe('btc_getTransaction', () => {
   afterAll(() => close());
 
   it('unknown hash returns null', async () => {
-    const { body } = await rpc(url, 'btc_getTransaction', ['0xdeadbeef']);
+    const { body } = await rpc(url, 'opstream_getTransaction', ['0xdeadbeef']);
     expect(body.result).toBeNull();
   });
 
   it('known hash returns tx fields', async () => {
-    const { body } = await rpc(url, 'btc_getTransaction', ['txKnown']);
+    const { body } = await rpc(url, 'opstream_getTransaction', ['txKnown']);
     expect(body.result.tx_hash).toBe('txKnown');
     expect(body.result.block_number).toBe(100);
     expect(typeof body.result.failed).toBe('boolean');
   });
 
   it('associated events are included', async () => {
-    const { body } = await rpc(url, 'btc_getTransaction', ['txKnown']);
+    const { body } = await rpc(url, 'opstream_getTransaction', ['txKnown']);
     expect(body.result.events).toHaveLength(1);
     expect(body.result.events[0].topics[0]).toBe('Mint');
   });
 
   it('missing params → -32602', async () => {
-    const { body } = await rpc(url, 'btc_getTransaction');
+    const { body } = await rpc(url, 'opstream_getTransaction');
     expect(body.error.code).toBe(-32602);
   });
 
   it('non-string param → -32602', async () => {
-    const { body } = await rpc(url, 'btc_getTransaction', [42]);
+    const { body } = await rpc(url, 'opstream_getTransaction', [42]);
     expect(body.error.code).toBe(-32602);
   });
 });
@@ -485,7 +485,7 @@ describe('RPC server — proxy pass-through', () => {
 
   afterAll(() => close());
 
-  it('unknown method is proxied with correct body', async () => {
+  it('allowlisted btc_* method is proxied with correct body to normalized URL', async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -498,25 +498,36 @@ describe('RPC server — proxy pass-through', () => {
 
     expect(mockFetch).toHaveBeenCalledOnce();
     const [calledUrl, init] = mockFetch.mock.calls[0] as [string, RequestInit];
-    expect(calledUrl).toBe('http://upstream.example');
+    // Base URL was 'http://upstream.example' — must be normalized to include /api/v1/json-rpc
+    expect(calledUrl).toBe('http://upstream.example/api/v1/json-rpc');
     const sent = JSON.parse(init.body as string) as { method: string; params: unknown[] };
     expect(sent.method).toBe('btc_getBalance');
     expect(sent.params).toEqual(['bc1qtest']);
     expect((body as { result: string }).result).toBe('proxied');
   });
 
-  it('proxy fetch error returns -32603', async () => {
+  it('unknown btc_* method (not in upstream allowlist) returns -32601 without a network call', async () => {
+    const mockFetch = vi.fn();
+    vi.stubGlobal('fetch', mockFetch);
+
+    const { body } = await nodePost(url, { jsonrpc: '2.0', id: 1, method: 'btc_unknownMethod', params: [] });
+    const b = body as { error: { code: number; message: string } };
+    expect(b.error.code).toBe(-32601);
+    expect(b.error.message).toContain('btc_unknownMethod');
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('proxy fetch error on allowlisted method returns -32603', async () => {
     const mockFetch = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
     vi.stubGlobal('fetch', mockFetch);
 
-    // Use nodePost so the rejection does not kill our own HTTP call
-    const { body } = await nodePost(url, { jsonrpc: '2.0', id: 1, method: 'btc_unknownMethod', params: [] });
+    const { body } = await nodePost(url, { jsonrpc: '2.0', id: 1, method: 'btc_getCode', params: ['bc1q'] });
     const b = body as { error: { code: number; message: string } };
     expect(b.error.code).toBe(-32603);
     expect(b.error.message).toContain('Upstream proxy error');
   });
 
-  it('proxy: upstream HTTP 404 returns clean -32603, not an exception string', async () => {
+  it('proxy: upstream HTTP 404 on allowlisted method returns clean -32603', async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: false,
       status: 404,
@@ -524,10 +535,10 @@ describe('RPC server — proxy pass-through', () => {
     } as unknown as Response);
     vi.stubGlobal('fetch', mockFetch);
 
-    const { body } = await nodePost(url, { jsonrpc: '2.0', id: 1, method: 'btc_notAMethod', params: [] });
+    const { body } = await nodePost(url, { jsonrpc: '2.0', id: 1, method: 'btc_getCode', params: ['bc1q'] });
     const b = body as { error: { code: number; message: string } };
     expect(b.error.code).toBe(-32603);
-    expect(b.error.message).toBe('Upstream returned HTTP 404 for method btc_notAMethod');
+    expect(b.error.message).toBe('Upstream returned HTTP 404 for method btc_getCode');
   });
 
   it('proxy: non-JSON upstream body returns clean -32603', async () => {
@@ -564,8 +575,8 @@ describe('RPC server — batch requests', () => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify([
-        { jsonrpc: '2.0', id: 1, method: 'btc_blockNumber', params: [] },
-        { jsonrpc: '2.0', id: 2, method: 'btc_blockNumber', params: [] },
+        { jsonrpc: '2.0', id: 1, method: 'opstream_blockNumber', params: [] },
+        { jsonrpc: '2.0', id: 2, method: 'opstream_blockNumber', params: [] },
       ]),
     });
     const body = await res.json() as Array<{ id: number; result: string }>;
@@ -580,8 +591,8 @@ describe('RPC server — batch requests', () => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify([
-        { jsonrpc: '2.0', id: 1, method: 'btc_blockNumber', params: [] },
-        { jsonrpc: '1.0', id: 2, method: 'btc_blockNumber' },  // wrong version
+        { jsonrpc: '2.0', id: 1, method: 'opstream_blockNumber', params: [] },
+        { jsonrpc: '1.0', id: 2, method: 'opstream_blockNumber' },  // wrong version
       ]),
     });
     const body = await res.json() as Array<{ id: number; result?: string; error?: { code: number } }>;
@@ -593,7 +604,7 @@ describe('RPC server — batch requests', () => {
   });
 });
 
-describe('btc_getBlockByNumber', () => {
+describe('opstream_getBlockByNumber', () => {
   let url: string;
   let close: () => Promise<void>;
   let db: DbAdapter;
@@ -613,19 +624,19 @@ describe('btc_getBlockByNumber', () => {
   afterAll(() => close());
 
   it('unknown block returns null', async () => {
-    const { body } = await rpc(url, 'btc_getBlockByNumber', [999999]);
+    const { body } = await rpc(url, 'opstream_getBlockByNumber', [999999]);
     expect(body.result).toBeNull();
   });
 
   it('slim form returns tx hashes (default)', async () => {
-    const { body } = await rpc(url, 'btc_getBlockByNumber', [941500]);
+    const { body } = await rpc(url, 'opstream_getBlockByNumber', [941500]);
     expect(body.result.block_number).toBe(941500);
     expect(body.result.block_hash).toBe('blockhash_941500');
     expect(body.result.transactions).toEqual(['txBN_A', 'txBN_B']);
   });
 
   it('full form (includeTx=true) returns RpcTransaction objects with events', async () => {
-    const { body } = await rpc(url, 'btc_getBlockByNumber', [941500, true]);
+    const { body } = await rpc(url, 'opstream_getBlockByNumber', [941500, true]);
     const txs = body.result.transactions as Array<{ tx_hash: string; events: unknown[] }>;
     expect(txs).toHaveLength(2);
     expect(txs[0]!.tx_hash).toBe('txBN_A');
@@ -635,7 +646,7 @@ describe('btc_getBlockByNumber', () => {
   });
 
   it('"latest" resolves via checkpoint', async () => {
-    const { body } = await rpc(url, 'btc_getBlockByNumber', ['latest']);
+    const { body } = await rpc(url, 'opstream_getBlockByNumber', ['latest']);
     // Checkpoint 500, no block at 500 → null (not an error)
     expect(body.result).toBeNull();
     expect(body.error).toBeUndefined();
@@ -643,17 +654,17 @@ describe('btc_getBlockByNumber', () => {
 
   it('hex block number is parsed', async () => {
     const hex = '0x' + (941500).toString(16);
-    const { body } = await rpc(url, 'btc_getBlockByNumber', [hex]);
+    const { body } = await rpc(url, 'opstream_getBlockByNumber', [hex]);
     expect(body.result.block_number).toBe(941500);
   });
 
   it('missing params → -32602', async () => {
-    const { body } = await rpc(url, 'btc_getBlockByNumber');
+    const { body } = await rpc(url, 'opstream_getBlockByNumber');
     expect(body.error.code).toBe(-32602);
   });
 });
 
-describe('btc_getBlockByHash', () => {
+describe('opstream_getBlockByHash', () => {
   let url: string;
   let close: () => Promise<void>;
   let db: DbAdapter;
@@ -668,29 +679,29 @@ describe('btc_getBlockByHash', () => {
   afterAll(() => close());
 
   it('unknown hash returns null', async () => {
-    const { body } = await rpc(url, 'btc_getBlockByHash', ['nope']);
+    const { body } = await rpc(url, 'opstream_getBlockByHash', ['nope']);
     expect(body.result).toBeNull();
   });
 
   it('known hash returns the block (slim)', async () => {
-    const { body } = await rpc(url, 'btc_getBlockByHash', ['blockhash_941600']);
+    const { body } = await rpc(url, 'opstream_getBlockByHash', ['blockhash_941600']);
     expect(body.result.block_number).toBe(941600);
     expect(body.result.transactions).toEqual(['txBH_A']);
   });
 
   it('includeTx=true expands transactions', async () => {
-    const { body } = await rpc(url, 'btc_getBlockByHash', ['blockhash_941600', true]);
+    const { body } = await rpc(url, 'opstream_getBlockByHash', ['blockhash_941600', true]);
     const txs = body.result.transactions as Array<{ tx_hash: string }>;
     expect(txs[0]!.tx_hash).toBe('txBH_A');
   });
 
   it('non-string param → -32602', async () => {
-    const { body } = await rpc(url, 'btc_getBlockByHash', [42]);
+    const { body } = await rpc(url, 'opstream_getBlockByHash', [42]);
     expect(body.error.code).toBe(-32602);
   });
 });
 
-describe('btc_getTransactionReceipt', () => {
+describe('opstream_getTransactionReceipt', () => {
   let url: string;
   let close: () => Promise<void>;
   let db: DbAdapter;
@@ -714,12 +725,12 @@ describe('btc_getTransactionReceipt', () => {
   afterAll(() => close());
 
   it('unknown hash returns null', async () => {
-    const { body } = await rpc(url, 'btc_getTransactionReceipt', ['0xdeadbeef']);
+    const { body } = await rpc(url, 'opstream_getTransactionReceipt', ['0xdeadbeef']);
     expect(body.result).toBeNull();
   });
 
   it('successful tx receipt includes events and failed=false', async () => {
-    const { body } = await rpc(url, 'btc_getTransactionReceipt', ['txRcpt']);
+    const { body } = await rpc(url, 'opstream_getTransactionReceipt', ['txRcpt']);
     expect(body.result.tx_hash).toBe('txRcpt');
     expect(body.result.failed).toBe(false);
     expect(body.result.events).toHaveLength(1);
@@ -727,18 +738,18 @@ describe('btc_getTransactionReceipt', () => {
   });
 
   it('failed tx surfaces failed=true + revert_reason', async () => {
-    const { body } = await rpc(url, 'btc_getTransactionReceipt', ['txFail']);
+    const { body } = await rpc(url, 'opstream_getTransactionReceipt', ['txFail']);
     expect(body.result.failed).toBe(true);
     expect(body.result.revert_reason).toBe('out of gas');
   });
 
   it('missing params → -32602', async () => {
-    const { body } = await rpc(url, 'btc_getTransactionReceipt');
+    const { body } = await rpc(url, 'opstream_getTransactionReceipt');
     expect(body.error.code).toBe(-32602);
   });
 });
 
-describe('btc_getCodeHash', () => {
+describe('opstream_getCodeHash', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
@@ -756,7 +767,7 @@ describe('btc_getCodeHash', () => {
       const { body } = await nodePost(url, {
         jsonrpc: '2.0',
         id: 1,
-        method: 'btc_getCodeHash',
+        method: 'opstream_getCodeHash',
         params: ['bc1qcontract1'],
       });
       expect((body as { result: string }).result).toBe('0xabc123hash');
@@ -777,7 +788,7 @@ describe('btc_getCodeHash', () => {
       const { body } = await nodePost(url, {
         jsonrpc: '2.0',
         id: 1,
-        method: 'btc_getCodeHash',
+        method: 'opstream_getCodeHash',
         params: ['bc1qunknown'],
       });
       expect((body as { result: unknown }).result).toBeNull();
@@ -791,7 +802,7 @@ describe('btc_getCodeHash', () => {
     const db = createTestDb();
     const { url, close } = await startTestServer(db);
     try {
-      const { body } = await rpc(url, 'btc_getCodeHash', [42]);
+      const { body } = await rpc(url, 'opstream_getCodeHash', [42]);
       expect(body.error.code).toBe(-32602);
     } finally {
       await close();

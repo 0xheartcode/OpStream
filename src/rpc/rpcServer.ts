@@ -1,26 +1,35 @@
 /**
  * JSON-RPC 2.0 HTTP server for OpStream.
  *
- * Implements a subset of the OPNET RPC surface served directly from the local
- * index — no block scanning required:
+ * Two strict namespaces:
  *
- *   btc_getLogs              — query indexed events by address/name/block range (O(1))
- *   btc_blockNumber          — latest indexed block from scan_checkpoints
- *   btc_getBlockReceipts     — all txs + events for a block in one call
- *   btc_getBlockByNumber     — block header + tx list (hashes or full)
- *   btc_getBlockByHash       — block header + tx list by block hash
- *   btc_getTransaction       — single tx + its events by hash
- *   btc_getTransactionReceipt — post-exec receipt (gas, status, logs) by tx hash
- *   btc_getCodeHash          — **OpStream-local extension**: bytecode hash for a
- *                              deployed contract. No proxy fallback — the upstream
- *                              OPNET RPC does not expose a getCodeHash method
- *                              (it has btc_getCode, which returns full bytecode).
- *                              Returns null for contracts that are not in the
- *                              local contract_deployments index.
+ *   btc_*        Real OPNET RPC methods. Proxied faithfully to the upstream
+ *                node at OPNET_RPC_URL (+/api/v1/json-rpc). Allowlisted
+ *                against the known upstream surface — unknown btc_* methods
+ *                return -32601 Method not found locally without hitting the
+ *                network, avoiding 10s timeouts for typos.
  *
- * All other methods are transparently proxied to the upstream OPNET node
- * (OPNET_RPC_URL), making OpStream a complete drop-in replacement for any
- * consumer currently pointing JSONRpcProvider at mainnet.opnet.org.
+ *   opstream_*   OpStream-local handlers served from the indexed SQLite/
+ *                Postgres data. These are either (a) fast alternatives to
+ *                upstream methods with richer response shapes that embed
+ *                events and tx metadata, or (b) queries upstream doesn't
+ *                support at all (getLogs, getCodeHash).
+ *
+ *     opstream_getLogs                query indexed events by address/name/block range
+ *     opstream_blockNumber            latest indexed checkpoint (can lag the chain tip)
+ *     opstream_getBlockByNumber       block header + full txs + nested events
+ *     opstream_getBlockByHash         same by block hash
+ *     opstream_getBlockReceipts       every tx + its events for a block
+ *     opstream_getTransaction         tx metadata + events by tx hash
+ *     opstream_getTransactionReceipt  post-exec receipt from the local index
+ *     opstream_getCodeHash            bytecode hash from contract_deployments
+ *
+ * Why not serve the btc_* names locally? The upstream shapes (for the
+ * handful that overlap) include merkle proofs and chain-state fields that
+ * OpStream doesn't store. Returning a lookalike with null fields would be
+ * dishonest; returning the richer shape under btc_* would break any
+ * consumer that expects native upstream JSON. Strict namespaces are the
+ * clean answer: btc_* is the chain, opstream_* is our index.
  *
  * Enable with: RPC_PORT=3001  (default 0 = disabled)
  * Works with both SQLite and Postgres via the DbAdapter abstraction.
@@ -136,12 +145,66 @@ interface BlockDbRow {
 // JSON-RPC 2.0 error codes
 // ---------------------------------------------------------------------------
 
-const PARSE_ERROR     = { code: -32700, message: 'Parse error' };
-const INVALID_REQUEST = { code: -32600, message: 'Invalid Request' };
-const INVALID_PARAMS  = { code: -32602, message: 'Invalid params' };
-const INTERNAL_ERROR  = { code: -32603, message: 'Internal error' };
+const PARSE_ERROR      = { code: -32700, message: 'Parse error' };
+const INVALID_REQUEST  = { code: -32600, message: 'Invalid Request' };
+const METHOD_NOT_FOUND = { code: -32601, message: 'Method not found' };
+const INVALID_PARAMS   = { code: -32602, message: 'Invalid params' };
+const INTERNAL_ERROR   = { code: -32603, message: 'Internal error' };
 
 const MAX_BODY_BYTES = 4 * 1024 * 1024; // 4 MB
+
+// ---------------------------------------------------------------------------
+// Upstream method surface
+// ---------------------------------------------------------------------------
+
+/**
+ * Every btc_* method the upstream OPNET RPC actually exposes, taken verbatim
+ * from opnet/build/providers/interfaces/JSONRpcMethods.js. Proxy requests for
+ * names not in this set are rejected locally with -32601 so typos and
+ * deprecated method names don't cost a round trip to upstream.
+ */
+const UPSTREAM_METHODS: ReadonlySet<string> = new Set([
+  'btc_blockNumber',
+  'btc_chainId',
+  'btc_reorg',
+  'btc_getBlockByHash',
+  'btc_getBlockByChecksum',
+  'btc_getBlockByNumber',
+  'btc_gas',
+  'btc_getTransactionByHash',
+  'btc_sendRawTransaction',
+  'btc_sendRawTransactionPackage',
+  'btc_preimage',
+  'btc_publicKeyInfo',
+  'btc_getUTXOs',
+  'btc_getBalance',
+  'btc_blockWitness',
+  'btc_internal',
+  'btc_getTransactionReceipt',
+  'btc_getCode',
+  'btc_getStorageAt',
+  'btc_latestEpoch',
+  'btc_getEpochByNumber',
+  'btc_getEpochByHash',
+  'btc_getEpochTemplate',
+  'btc_submitEpoch',
+  'btc_call',
+  'btc_getMempoolInfo',
+  'btc_getPendingTransaction',
+  'btc_getLatestPendingTransactions',
+]);
+
+/**
+ * Normalize an upstream base URL. The OPNET node speaks JSON-RPC at
+ * /api/v1/json-rpc, but callers typically pass just the hostname
+ * (e.g. https://mainnet.opnet.org). Mirror the same append-if-missing
+ * logic used by opnet's JSONRpcProvider.providerUrl() so a bare hostname
+ * and a fully-qualified endpoint both work.
+ */
+function normalizeUpstreamUrl(url: string): string {
+  if (url.includes('/api/v1/json-rpc')) return url;
+  return url.replace(/\/+$/, '') + '/api/v1/json-rpc';
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -582,17 +645,25 @@ async function handleSingle(
 
   const { id, method, params } = raw;
 
+  // opstream_* — always local, richer shapes, served from the index.
   switch (method) {
-    case 'btc_getLogs':               return handleGetLogs(id, params, db);
-    case 'btc_blockNumber':           return handleBlockNumber(id, db);
-    case 'btc_getBlockReceipts':      return handleGetBlockReceipts(id, params, db);
-    case 'btc_getBlockByNumber':      return handleGetBlockByNumber(id, params, db);
-    case 'btc_getBlockByHash':        return handleGetBlockByHash(id, params, db);
-    case 'btc_getTransaction':        return handleGetTransaction(id, params, db);
-    case 'btc_getTransactionReceipt': return handleGetTransactionReceipt(id, params, db);
-    case 'btc_getCodeHash':           return handleGetCodeHash(id, params, db);
-    default:                          return proxyToUpstream(id, method, params, upstreamUrl);
+    case 'opstream_getLogs':               return handleGetLogs(id, params, db);
+    case 'opstream_blockNumber':           return handleBlockNumber(id, db);
+    case 'opstream_getBlockReceipts':      return handleGetBlockReceipts(id, params, db);
+    case 'opstream_getBlockByNumber':      return handleGetBlockByNumber(id, params, db);
+    case 'opstream_getBlockByHash':        return handleGetBlockByHash(id, params, db);
+    case 'opstream_getTransaction':        return handleGetTransaction(id, params, db);
+    case 'opstream_getTransactionReceipt': return handleGetTransactionReceipt(id, params, db);
+    case 'opstream_getCodeHash':           return handleGetCodeHash(id, params, db);
   }
+
+  // btc_* — strict proxy against the known upstream surface. Anything not
+  // in the allowlist (typos, deprecated methods, opstream_* misspellings)
+  // gets a local -32601 instead of a slow upstream round trip.
+  if (UPSTREAM_METHODS.has(method)) {
+    return proxyToUpstream(id, method, params, upstreamUrl);
+  }
+  return fail(id, { code: METHOD_NOT_FOUND.code, message: `Method not found: ${method}` });
 }
 
 // ---------------------------------------------------------------------------
@@ -601,8 +672,9 @@ async function handleSingle(
 
 export function createRpcHandler(
   db: DbAdapter,
-  upstreamUrl: string,
+  upstreamUrlRaw: string,
 ): (req: IncomingMessage, res: ServerResponse) => void {
+  const upstreamUrl = normalizeUpstreamUrl(upstreamUrlRaw);
   return (req: IncomingMessage, res: ServerResponse): void => {
     void (async () => {
       if (req.method !== 'POST') {

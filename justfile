@@ -114,7 +114,7 @@ db-status:
     SIZE=$(du -sh "$DB" | cut -f1)
     echo "${CYAN}Size:     $SIZE${RESET}"
     echo ""
-    QUERY="SELECT 'blocks' AS \"table\", count(*) AS rows FROM blocks UNION ALL SELECT 'transactions', count(*) FROM transactions UNION ALL SELECT 'tx_outputs', count(*) FROM tx_outputs UNION ALL SELECT 'events', count(*) FROM events UNION ALL SELECT 'token_deployments', count(*) FROM token_deployments UNION ALL SELECT 'scan_checkpoints', count(*) FROM scan_checkpoints UNION ALL SELECT 'tokens', count(*) FROM tokens UNION ALL SELECT 'runtime_metrics', count(*) FROM runtime_metrics UNION ALL SELECT 'error_log', count(*) FROM error_log;"
+    QUERY="SELECT 'blocks' AS \"table\", count(*) AS rows FROM blocks UNION ALL SELECT 'transactions', count(*) FROM transactions UNION ALL SELECT 'tx_outputs', count(*) FROM tx_outputs UNION ALL SELECT 'events', count(*) FROM events UNION ALL SELECT 'contract_deployments', count(*) FROM contract_deployments UNION ALL SELECT 'scan_checkpoints', count(*) FROM scan_checkpoints UNION ALL SELECT 'tokens', count(*) FROM tokens UNION ALL SELECT 'runtime_metrics', count(*) FROM runtime_metrics UNION ALL SELECT 'error_log', count(*) FROM error_log;"
     sqlite3 -header -column "$DB" "$QUERY"
     echo ""
     sqlite3 "$DB" "SELECT 'Checkpoint: block ' || last_block || '  (updated ' || datetime(updated_at, 'unixepoch') || ')' FROM scan_checkpoints WHERE scan_type = 'indexer';"

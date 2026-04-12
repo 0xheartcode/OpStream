@@ -134,7 +134,7 @@ const recent = await db.all(
 ```typescript
 // All contracts deployed by an address
 const deployed = await db.all(
-  `SELECT * FROM token_deployments
+  `SELECT * FROM contract_deployments
    WHERE deployer = ?
    ORDER BY block_number ASC`,
   ['bc1qdeployer…'],
@@ -142,7 +142,7 @@ const deployed = await db.all(
 
 // Check if a contract is deployed
 const exists = await db.get(
-  `SELECT 1 FROM token_deployments WHERE contract_address = ?`,
+  `SELECT 1 FROM contract_deployments WHERE contract_address = ?`,
   ['bc1qcontract…'],
 );
 ```
@@ -226,7 +226,7 @@ Gas and fee columns are stored as decimal strings because the on-chain values ar
 | `script_type` | TEXT | e.g. `p2wpkh`, `p2pkh`, `p2sh` |
 | `address` | TEXT | Recipient Bitcoin address |
 
-### `token_deployments`
+### `contract_deployments`
 
 | Column | Type | Description |
 |--------|------|-------------|

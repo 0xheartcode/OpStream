@@ -11,7 +11,7 @@
  *   tx_outputs         Bitcoin UTXO outputs per transaction (value flows)
  *   events             Every decoded event from every contract
  *   scan_checkpoints   Block scanning progress (resumable)
- *   token_deployments  Contract creation tracking (chain-level)
+ *   contract_deployments  Contract creation tracking (chain-level)
  *   tokens             OP20 metadata cache — written by OpKit, not OpStream
  *   runtime_metrics    Performance counters
  *   error_log          Error tracking
@@ -95,7 +95,8 @@ CREATE INDEX IF NOT EXISTS idx_events_name          ON events(event_name);
 CREATE INDEX IF NOT EXISTS idx_events_contract_name ON events(contract_address, event_name);
 CREATE INDEX IF NOT EXISTS idx_events_tx_hash       ON events(tx_hash);
 
-CREATE TABLE IF NOT EXISTS token_deployments (
+-- Every OPNetTransactionTypes.Deployment tx, not just OP-20 tokens.
+CREATE TABLE IF NOT EXISTS contract_deployments (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
   block_number     INTEGER NOT NULL,
   tx_hash          TEXT NOT NULL UNIQUE,
@@ -105,9 +106,9 @@ CREATE TABLE IF NOT EXISTS token_deployments (
   created_at       INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
-CREATE INDEX IF NOT EXISTS idx_token_deployments_block    ON token_deployments(block_number);
-CREATE INDEX IF NOT EXISTS idx_token_deployments_contract ON token_deployments(contract_address);
-CREATE INDEX IF NOT EXISTS idx_token_deployments_deployer ON token_deployments(deployer);
+CREATE INDEX IF NOT EXISTS idx_contract_deployments_block    ON contract_deployments(block_number);
+CREATE INDEX IF NOT EXISTS idx_contract_deployments_contract ON contract_deployments(contract_address);
+CREATE INDEX IF NOT EXISTS idx_contract_deployments_deployer ON contract_deployments(deployer);
 
 -- Owned by OpKit — OpStream never writes to this table.
 -- Kept here so OpKit can co-locate its token metadata alongside OpStream data.
@@ -254,6 +255,25 @@ function runMigrations(db: Database.Database): void {
         db.exec(`DROP TABLE block_hashes`);
       }
     }
+    // token_deployments → contract_deployments rename. The table always stored
+    // every OPNetTransactionTypes.Deployment tx (not only OP-20 tokens), so the
+    // old name was misleading. We rename in-place and drop the old indexes;
+    // the new indexes are created on the first CREATE TABLE IF NOT EXISTS pass.
+    const oldDeployTable = db.prepare(
+      `SELECT name FROM sqlite_master WHERE type='table' AND name='token_deployments'`,
+    ).all() as Array<{ name: string }>;
+    if (oldDeployTable.length > 0) {
+      const newDeployTable = db.prepare(
+        `SELECT name FROM sqlite_master WHERE type='table' AND name='contract_deployments'`,
+      ).all() as Array<{ name: string }>;
+      if (newDeployTable.length === 0) {
+        db.exec(`ALTER TABLE token_deployments RENAME TO contract_deployments`);
+        db.exec(`DROP INDEX IF EXISTS idx_token_deployments_block`);
+        db.exec(`DROP INDEX IF EXISTS idx_token_deployments_contract`);
+        db.exec(`DROP INDEX IF EXISTS idx_token_deployments_deployer`);
+      }
+    }
+
     // mempool_pending table — pending OPNET transactions from the Bitcoin mempool
     const mempoolTables = db.prepare(
       `SELECT name FROM sqlite_master WHERE type='table' AND name='mempool_pending'`,

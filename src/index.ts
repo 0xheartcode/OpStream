@@ -34,8 +34,8 @@ export {
 export type { ScanResult, ScanOptions, OnEventCallback } from './indexer/scanner.js';
 
 // Bootstrap (CLI orchestration)
-export { runBootstrap, runBootstrapCore, runCatchup, queryTokenDeployments } from './indexer/bootstrap.js';
-export type { BootstrapOptions, BootstrapResult, TokenDeploymentRow } from './indexer/bootstrap.js';
+export { runBootstrap, runBootstrapCore, runCatchup, queryContractDeployments } from './indexer/bootstrap.js';
+export type { BootstrapOptions, BootstrapResult, ContractDeploymentRow } from './indexer/bootstrap.js';
 
 // Event store
 export { insertEvent, insertEventsBatch, queryEvents, backfillDecoded } from './indexer/eventStore.js';

@@ -41,7 +41,7 @@ export interface BootstrapResult {
 // Token deployment query
 // ---------------------------------------------------------------------------
 
-export interface TokenDeploymentRow {
+export interface ContractDeploymentRow {
   id: number;
   block_number: number;
   tx_hash: string;
@@ -51,12 +51,12 @@ export interface TokenDeploymentRow {
   created_at: number;
 }
 
-export async function queryTokenDeployments(
+export async function queryContractDeployments(
   db: DbAdapter,
   sinceBlock: number,
-): Promise<TokenDeploymentRow[]> {
-  return db.all<TokenDeploymentRow>(
-    `SELECT * FROM token_deployments WHERE block_number >= ? ORDER BY block_number ASC`,
+): Promise<ContractDeploymentRow[]> {
+  return db.all<ContractDeploymentRow>(
+    `SELECT * FROM contract_deployments WHERE block_number >= ? ORDER BY block_number ASC`,
     [sinceBlock],
   );
 }

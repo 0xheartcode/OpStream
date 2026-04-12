@@ -85,7 +85,7 @@ async function seedTx(db: DbAdapter, txHash: string, blockNumber: number, txInde
   );
 }
 
-/** Seed a contract deployment row (table is still `token_deployments` pre-rename). */
+/** Seed a contract deployment row. */
 async function seedDeployment(
   db: DbAdapter,
   contractAddress: string,
@@ -94,7 +94,7 @@ async function seedDeployment(
   txHash = 'deploy_' + contractAddress,
 ): Promise<void> {
   await db.run(
-    `INSERT OR IGNORE INTO token_deployments
+    `INSERT OR IGNORE INTO contract_deployments
        (block_number, tx_hash, contract_address, deployer, bytecode_hash)
      VALUES (?, ?, ?, 'bc1qdeployer', ?)`,
     [blockNumber, txHash, contractAddress, bytecodeHash],

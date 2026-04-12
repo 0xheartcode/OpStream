@@ -489,7 +489,7 @@ async function handleGetTransactionReceipt(
 /**
  * btc_getCodeHash — bytecode hash for a deployed contract.
  *
- * Serves from token_deployments (scanner writes bytecode_hash for every
+ * Serves from contract_deployments (scanner writes bytecode_hash for every
  * OPNetTransactionTypes.Deployment, not just OP20 tokens). On local miss the
  * request is proxied upstream — a contract deployed before BOOTSTRAP_FROM_BLOCK
  * will not be in the local index, and EOAs (which have no code) are also
@@ -506,7 +506,7 @@ async function handleGetCodeHash(
 
   try {
     const row = await db.get<{ bytecode_hash: string | null }>(
-      'SELECT bytecode_hash FROM token_deployments WHERE contract_address = ? LIMIT 1',
+      'SELECT bytecode_hash FROM contract_deployments WHERE contract_address = ? LIMIT 1',
       [address],
     );
     if (row && row.bytecode_hash) return ok(id, row.bytecode_hash);

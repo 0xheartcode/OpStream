@@ -116,7 +116,7 @@ These have been run against mainnet and produce correct output:
 - Every `interaction` tx stores: `calldata` (BLOB), `calldata_length`, `senderPubKeyHash`
 - Every tx stores: `gasUsed`, `specialGasUsed`, `burnedBitcoin`, `priorityFee`, `maxGasSat`, `failed`, `revertReason`
 - `tx_outputs` captured for every tx (UTXO index, value in satoshis, script type, recipient address)
-- `token_deployments` captured for every `deployment` tx (deployer address, bytecode SHA-256 hash prefix)
+- `contract_deployments` captured for every `deployment` tx (deployer address, bytecode SHA-256 hash prefix)
 
 **SubscriptionManager / webhooks** (`src/indexer/webhooks.ts`)
 - Pattern matching: `contract` (case-insensitive), `eventName`, `minAmount` (from `decoded_json`)
@@ -208,7 +208,7 @@ Pool discovery logic (`processNativeSwapPools`, `processMotoswapPools`, etc.) wa
 | `tx_outputs` | Bitcoin UTXO outputs per tx — value flows in satoshis |
 | `events` | Every decoded event from every contract |
 | `scan_checkpoints` | Scanner progress (resumable) |
-| `token_deployments` | Contract creation tracking |
+| `contract_deployments` | Contract creation tracking |
 | `tokens` | OP20 metadata cache — written by OpKit, not OpStream |
 | `runtime_metrics` | Performance counters |
 | `error_log` | Error tracking |
@@ -274,7 +274,7 @@ const txs = db.prepare(
 
 // All contracts deployed by an address
 const deploys = db.prepare(
-  `SELECT * FROM token_deployments WHERE deployer = ? ORDER BY block_number ASC`
+  `SELECT * FROM contract_deployments WHERE deployer = ? ORDER BY block_number ASC`
 ).all('0xabc...');
 
 // Failed transactions in the last 100 blocks

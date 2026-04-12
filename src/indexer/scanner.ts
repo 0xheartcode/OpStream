@@ -202,7 +202,7 @@ export async function deleteBlockDataFrom(db: DbAdapter, fromBlock: number): Pro
   await db.run(`DELETE FROM events       WHERE block_number >= ?`, [fromBlock]);
   await db.run(`DELETE FROM transactions WHERE block_number >= ?`, [fromBlock]);
   await db.run(`DELETE FROM blocks       WHERE block_number >= ?`, [fromBlock]);
-  await db.run(`DELETE FROM token_deployments WHERE block_number >= ?`, [fromBlock]);
+  await db.run(`DELETE FROM contract_deployments WHERE block_number >= ?`, [fromBlock]);
 }
 
 // ---------------------------------------------------------------------------
@@ -232,7 +232,7 @@ const SQL_INSERT_OUTPUT = `
 `;
 
 const SQL_INSERT_DEPLOY = `
-  INSERT INTO token_deployments
+  INSERT INTO contract_deployments
     (block_number, tx_hash, contract_address, deployer, bytecode_hash)
   VALUES (?, ?, ?, ?, ?)
   ON CONFLICT DO NOTHING

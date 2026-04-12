@@ -33,7 +33,7 @@ async function seedAll(db: DbAdapter): Promise<void> {
      VALUES (100, 'tx1', 'bc1qc', 'Transfer', 0, x'aabb', 2)`,
   );
   await db.run(
-    `INSERT INTO token_deployments
+    `INSERT INTO contract_deployments
        (block_number, tx_hash, contract_address, deployer, bytecode_hash)
      VALUES (100, 'deploy1', 'bc1qtok', 'bc1qdeployer', '0xdeadbeef')`,
   );

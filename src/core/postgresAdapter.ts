@@ -74,7 +74,7 @@ CREATE TABLE IF NOT EXISTS events (
   UNIQUE(block_number, tx_hash, contract_address, event_name, log_index)
 );
 
-CREATE TABLE IF NOT EXISTS token_deployments (
+CREATE TABLE IF NOT EXISTS contract_deployments (
   id               BIGSERIAL PRIMARY KEY,
   block_number     BIGINT NOT NULL,
   tx_hash          TEXT NOT NULL UNIQUE,
@@ -119,9 +119,9 @@ CREATE INDEX IF NOT EXISTS idx_events_contract         ON events(contract_addres
 CREATE INDEX IF NOT EXISTS idx_events_name             ON events(event_name);
 CREATE INDEX IF NOT EXISTS idx_events_contract_name    ON events(contract_address, event_name);
 CREATE INDEX IF NOT EXISTS idx_events_tx_hash          ON events(tx_hash);
-CREATE INDEX IF NOT EXISTS idx_token_deployments_block    ON token_deployments(block_number);
-CREATE INDEX IF NOT EXISTS idx_token_deployments_contract ON token_deployments(contract_address);
-CREATE INDEX IF NOT EXISTS idx_token_deployments_deployer ON token_deployments(deployer);
+CREATE INDEX IF NOT EXISTS idx_contract_deployments_block    ON contract_deployments(block_number);
+CREATE INDEX IF NOT EXISTS idx_contract_deployments_contract ON contract_deployments(contract_address);
+CREATE INDEX IF NOT EXISTS idx_contract_deployments_deployer ON contract_deployments(deployer);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tokens_alt_address  ON tokens(alt_address) WHERE alt_address IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_error_log_level         ON error_log(level);
 CREATE INDEX IF NOT EXISTS idx_error_log_created       ON error_log(created_at);

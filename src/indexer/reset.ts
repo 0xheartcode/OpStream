@@ -7,7 +7,7 @@
  *
  * What it clears:
  *   - blocks, transactions, tx_outputs, events  (raw scan data)
- *   - token_deployments                          (deployment index)
+ *   - contract_deployments                          (deployment index)
  *   - scan_checkpoints                           (so bootstrap restarts at FROM_BLOCK)
  *   - mempool_pending                            (pending-tx cache)
  *
@@ -25,7 +25,7 @@ export const RESET_TABLES: readonly string[] = [
   'tx_outputs',
   'transactions',
   'blocks',
-  'token_deployments',
+  'contract_deployments',
   'scan_checkpoints',
   'mempool_pending',
 ] as const;

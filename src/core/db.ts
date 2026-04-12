@@ -27,16 +27,18 @@ const SCHEMA = `
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 
--- tx_count is the number of OPNET-relevant txs (interaction + deployment)
--- actually persisted by the scanner; btc_tx_count is the raw Bitcoin block
--- size (all txs in the block, OPNET or not). With OPSTREAM_STORE_GENERIC_TXS
--- off (default) btc_tx_count is typically ~20x larger than tx_count.
+-- tx_count is the raw Bitcoin block size (every tx in the block, OPNET or not)
+-- and matches the txCount field returned by upstream btc_getBlockByNumber.
+-- opnet_tx_count is the OPStream-local metric: count of OPNET-relevant txs
+-- (interaction + deployment) actually persisted by the scanner. With
+-- OPSTREAM_STORE_GENERIC_TXS off (default) tx_count is typically ~20x larger
+-- than opnet_tx_count.
 CREATE TABLE IF NOT EXISTS blocks (
-  block_number  INTEGER PRIMARY KEY,
-  block_hash    TEXT NOT NULL,
-  timestamp     INTEGER,
-  tx_count      INTEGER NOT NULL DEFAULT 0,
-  btc_tx_count  INTEGER
+  block_number    INTEGER PRIMARY KEY,
+  block_hash      TEXT NOT NULL,
+  timestamp       INTEGER,
+  tx_count        INTEGER,
+  opnet_tx_count  INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS transactions (
@@ -260,11 +262,33 @@ function runMigrations(db: Database.Database): void {
         db.exec(`DROP TABLE block_hashes`);
       }
     }
-    // btc_tx_count column added to blocks — existing rows will have NULL
-    // (unknown raw Bitcoin block size). Future scans populate both columns.
+    // blocks.tx_count semantic swap to match upstream btc_getBlockByNumber:
+    //   tx_count       = raw Bitcoin block size (was btc_tx_count in the
+    //                    previous schema, or the same column repurposed from
+    //                    the old "OPNET stored count" semantic).
+    //   opnet_tx_count = OPStream-local count of persisted OPNET txs (new
+    //                    column name for what used to be called tx_count).
+    //
+    // Two-step rename handles both migration paths cleanly: databases that
+    // already went through commit 7eeb794 have both columns (old semantics),
+    // and older databases only have tx_count (pre-btc_tx_count).
     const blockCols = db.prepare('PRAGMA table_info(blocks)').all() as Array<{ name: string }>;
-    if (blockCols.length > 0 && !blockCols.some(c => c.name === 'btc_tx_count')) {
-      db.exec(`ALTER TABLE blocks ADD COLUMN btc_tx_count INTEGER`);
+    const hasBtcCol   = blockCols.some(c => c.name === 'btc_tx_count');
+    const hasOpnetCol = blockCols.some(c => c.name === 'opnet_tx_count');
+
+    if (blockCols.length > 0 && !hasOpnetCol) {
+      if (hasBtcCol) {
+        // Post-7eeb794 databases: swap the two columns.
+        // tx_count (OPNET) → opnet_tx_count, btc_tx_count (raw) → tx_count.
+        db.exec(`ALTER TABLE blocks RENAME COLUMN tx_count TO opnet_tx_count`);
+        db.exec(`ALTER TABLE blocks RENAME COLUMN btc_tx_count TO tx_count`);
+      } else {
+        // Pre-btc_tx_count databases: existing tx_count meant raw Bitcoin
+        // (because generic txs were stored by default), which matches the
+        // new meaning. Just add opnet_tx_count; older rows get 0 — we can't
+        // distinguish historically without a rescan.
+        db.exec(`ALTER TABLE blocks ADD COLUMN opnet_tx_count INTEGER NOT NULL DEFAULT 0`);
+      }
     }
 
     // token_deployments → contract_deployments rename. The table always stored

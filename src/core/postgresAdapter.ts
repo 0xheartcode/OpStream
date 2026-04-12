@@ -22,8 +22,8 @@ CREATE TABLE IF NOT EXISTS blocks (
   block_number BIGINT PRIMARY KEY,
   block_hash   TEXT NOT NULL,
   timestamp    BIGINT,
-  tx_count     INTEGER NOT NULL DEFAULT 0,
-  btc_tx_count INTEGER
+  tx_count       INTEGER,
+  opnet_tx_count INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS transactions (

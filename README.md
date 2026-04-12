@@ -175,8 +175,9 @@ Pool discovery logic (`processNativeSwapPools`, `processMotoswapPools`, etc.) wa
 | Command | Description |
 |---------|-------------|
 | `start` | Bootstrap + live — catch up to chain tip, then follow it continuously |
-| `bootstrap` | Full scan from `BOOTSTRAP_FROM_BLOCK` to chain tip. Checkpoint-resumable. Exits when done. |
+| `bootstrap` | Full scan from `BOOTSTRAP_FROM_BLOCK` to chain tip (or `BOOTSTRAP_TO_BLOCK` when set). Checkpoint-resumable. Exits when done. |
 | `live` | Follow chain tip only (assumes already caught up). Includes reorg detection. |
+| `reset [--yes]` | Truncate all scanned data (blocks, transactions, events, deployments, checkpoints, mempool). Destructive — interactive confirmation unless `--yes` or `FORCE=1`. |
 
 ## Environment Variables
 
@@ -185,8 +186,10 @@ Pool discovery logic (`processNativeSwapPools`, `processMotoswapPools`, etc.) wa
 | `OPNET_RPC_URL` | `https://mainnet.opnet.org` | OPNET JSON-RPC endpoint |
 | `DB_PATH` | `data/opstream.db` | SQLite database file |
 | `BOOTSTRAP_FROM_BLOCK` | `941400` | Starting block for bootstrap |
+| `BOOTSTRAP_TO_BLOCK` | (unset) | Stop block (inclusive). Unset scans to chain tip; setting it enables bounded repeatable runs, e.g. `BOOTSTRAP_FROM_BLOCK=941400 BOOTSTRAP_TO_BLOCK=941499` scans exactly 100 blocks regardless of tip. |
 | `BOOTSTRAP_RPS` | `10` | Rate limit (requests per second) |
 | `BOOTSTRAP_CHUNK_SIZE` | `500` | Blocks per chunk |
+| `OPSTREAM_STORE_GENERIC_TXS` | `false` | Store non-OPNET Bitcoin txs in every block (plain BTC payments, miner coinbases, etc.). Off by default — in typical OPNET blocks these are ~95% of rows and nothing queries them, so persisting them bloats the DB ~10× for no practical gain. Set `true` for a full chain archive. |
 | `RPC_PORT` | `0` (disabled) | JSON-RPC 2.0 HTTP server port. Set to e.g. `3001` to enable. |
 | `WS_PORT` | `0` (disabled) | WebSocket broadcast port. Set to e.g. `8080` to enable. |
 | `WEBHOOK_URLS` | (none) | Comma-separated HTTP callback URLs for event notifications |
@@ -203,8 +206,8 @@ Pool discovery logic (`processNativeSwapPools`, `processMotoswapPools`, etc.) wa
 
 | Table | Purpose |
 |-------|---------|
-| `blocks` | Block metadata — hash, timestamp, tx count |
-| `transactions` | Every tx — sender, gas, fees, calldata, revert status |
+| `blocks` | Block metadata — hash, timestamp, `tx_count` (raw Bitcoin block size, matches upstream `btc_getBlockByNumber`), `opnet_tx_count` (OPNET-relevant txs we persisted) |
+| `transactions` | OPNET-relevant txs — sender, gas, fees, calldata, revert status. Non-OPNET Bitcoin txs are skipped by default (see `OPSTREAM_STORE_GENERIC_TXS`). |
 | `tx_outputs` | Bitcoin UTXO outputs per tx — value flows in satoshis |
 | `events` | Every decoded event from every contract |
 | `scan_checkpoints` | Scanner progress (resumable) |
@@ -216,7 +219,9 @@ Pool discovery logic (`processNativeSwapPools`, `processMotoswapPools`, etc.) wa
 
 ### What the `transactions` table captures
 
-Every transaction exposes these fields via the OPNET SDK — OpStream stores all of them:
+OPNET blocks are Bitcoin blocks — every block returned by an OPNET node contains every Bitcoin transaction in that block, each tagged with an `OPNetType` of `Interaction`, `Deployment`, or `Generic` (plain BTC payment). With the default `OPSTREAM_STORE_GENERIC_TXS=false`, only `interaction` and `deployment` rows are persisted; generics are classified, counted via `blocks.tx_count`, and then dropped. Set the flag to `true` for a full chain archive.
+
+Every stored transaction exposes these fields via the OPNET SDK — OpStream stores all of them:
 
 | Column | Description |
 |--------|-------------|
@@ -382,50 +387,58 @@ OpStream's raw tables are the stable foundation; OpKit's derived tables are what
 
 ## JSON-RPC 2.0 server
 
-Set `RPC_PORT` to expose a local HTTP endpoint. Any consumer currently pointing `JSONRpcProvider` at `mainnet.opnet.org` can point at `http://localhost:RPC_PORT` instead — known methods are answered from the local index, everything else is proxied transparently upstream.
+Set `RPC_PORT` to expose a local HTTP endpoint. The server speaks two strict namespaces.
 
 ```bash
 RPC_PORT=3001 npx tsx src/main.ts start
 ```
 
-### Implemented (served from local index)
+### Two namespaces, one rule each
 
-#### `btc_blockNumber`
-Returns the latest indexed block as a hex string.
+**`btc_*` — real OPNET RPC, always proxied upstream.** Point any opnet-SDK client at OpStream and every method the SDK calls (`btc_getBlockByNumber`, `btc_getCode`, `btc_sendRawTransaction`, `btc_call`, `btc_getBalance`, `btc_getTransactionReceipt`, and ~22 more) is forwarded to `OPNET_RPC_URL` unchanged. Responses come back with the exact upstream shape — merkle proofs, chain-state fields, everything. OpStream is a transparent pass-through for the `btc_*` surface; consumers don't need to change any code to use it.
+
+The proxy runs against an **allowlist of 28 known upstream methods**, taken verbatim from `opnet/build/providers/interfaces/JSONRpcMethods.js`. Any `btc_*` name not on the allowlist (typos, deprecated methods, unknown aliases) returns a local `-32601 Method not found` without a network round trip — no 10-second timeouts for misspellings.
+
+**`opstream_*` — local handlers served from the indexed SQLite/Postgres data.** These either (a) answer queries upstream doesn't support at all (`getLogs`, `getCodeHash`), or (b) return richer shapes that embed events and tx metadata inline, which the native `btc_*` equivalents don't. Callers opt in explicitly by using the `opstream_*` method name.
+
+| Method | Purpose |
+|---|---|
+| `opstream_getLogs` | Events by contract address / name / block range. O(1) indexed SQL. Upstream has no equivalent. |
+| `opstream_blockNumber` | Latest indexed checkpoint (can lag the chain tip; use `btc_blockNumber` for the live tip) |
+| `opstream_getBlockByNumber` | Block header + every OPNET tx in the block + nested events (slim or full via `includeTx` param) |
+| `opstream_getBlockByHash` | Same by block hash |
+| `opstream_getBlockReceipts` | Every tx + events for a block in one call |
+| `opstream_getTransaction` | Tx metadata + all events by tx hash |
+| `opstream_getTransactionReceipt` | Post-exec receipt from the local index (same shape as `opstream_getTransaction`) |
+| `opstream_getCodeHash` | 8-byte truncated SHA-256 of contract bytecode from `contract_deployments`. Returns `null` for addresses not in the local index (EOAs, pre-bootstrap deployments). No proxy fallback — upstream doesn't expose a getCodeHash method. |
+
+### Why the strict split?
+
+The upstream shapes for methods that overlap with ours (`btc_getBlockByNumber`, `btc_getTransactionReceipt`) include fields we don't store locally — merkle checksum proofs, receipt proofs, native Bitcoin header fields. Returning a lookalike with `null` for missing fields would be silently broken; returning our richer shape under the same `btc_*` name would break any consumer that expects native JSON. Strict namespaces are the clean answer: **`btc_*` is the chain, `opstream_*` is our index.**
+
+### Examples
+
 ```bash
+# Pure OpStream — query events by block range (no upstream equivalent)
+curl -s -X POST http://localhost:3001 -H 'Content-Type: application/json' -d '{
+  "jsonrpc":"2.0","id":1,"method":"opstream_getLogs",
+  "params":[{"address":"op1sq...","eventName":"Swap","fromBlock":941400,"toBlock":"latest"}]
+}' | jq '.result | length'
+
+# Local: block + all OPNET txs + events nested inline
 curl -s -X POST http://localhost:3001 -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"btc_blockNumber","params":[]}' | jq
+  -d '{"jsonrpc":"2.0","id":2,"method":"opstream_getBlockByNumber","params":[941400, true]}' | jq
+
+# Transparent upstream: opnet SDK just works
+curl -s -X POST http://localhost:3001 -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":3,"method":"btc_getBlockByNumber","params":[941400]}' | jq
+
+# Local: 8-byte bytecode hash for a contract we've indexed
+curl -s -X POST http://localhost:3001 -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":4,"method":"opstream_getCodeHash","params":["op1sq..."]}' | jq
 ```
 
-#### `btc_getLogs`
-Query events by contract address, event name, and/or block range. O(1) indexed SQL query — no block scanning.
-
-```bash
-curl -s -X POST http://localhost:3001 -H 'Content-Type: application/json' \
-  -d '{
-    "jsonrpc":"2.0","id":2,"method":"btc_getLogs",
-    "params":[{ "address":"bc1q...", "eventName":"Swap", "fromBlock":941400, "toBlock":"latest" }]
-  }' | jq '.result | length'
-```
-
-Filter params (all optional): `address` (string), `eventName` (string), `fromBlock` (number|`"latest"`), `toBlock` (number|`"latest"`).
-
-#### `btc_getBlockReceipts`
-All transactions and their events for a block in one call.
-```bash
-curl -s -X POST http://localhost:3001 -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":3,"method":"btc_getBlockReceipts","params":[941401]}' | jq
-```
-
-#### `btc_getTransaction`
-Single transaction metadata plus all its associated events by hash.
-```bash
-curl -s -X POST http://localhost:3001 -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":4,"method":"btc_getTransaction","params":["<tx_hash>"]}' | jq
-```
-
-### Proxy pass-through
-All other methods (`btc_call`, `btc_getBalance`, `btc_sendRawTransaction`, etc.) are forwarded verbatim to `OPNET_RPC_URL`. Works with both SQLite and Postgres backends via the `DbAdapter` abstraction.
+Works with both SQLite and Postgres via the `DbAdapter` abstraction.
 
 ---
 

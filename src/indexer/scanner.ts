@@ -182,23 +182,33 @@ export async function saveCheckpoint(db: DbAdapter, block: bigint): Promise<void
 // ---------------------------------------------------------------------------
 
 const SQL_SAVE_BLOCK = `
-  INSERT INTO blocks (block_number, block_hash, timestamp, tx_count)
-  VALUES (?, ?, ?, ?)
+  INSERT INTO blocks (block_number, block_hash, timestamp, tx_count, btc_tx_count)
+  VALUES (?, ?, ?, ?, ?)
   ON CONFLICT (block_number) DO UPDATE SET
-    block_hash = excluded.block_hash,
-    timestamp  = excluded.timestamp,
-    tx_count   = excluded.tx_count
+    block_hash   = excluded.block_hash,
+    timestamp    = excluded.timestamp,
+    tx_count     = excluded.tx_count,
+    btc_tx_count = excluded.btc_tx_count
 `;
 const SQL_GET_BLOCK_HASH = `SELECT block_hash FROM blocks WHERE block_number = ?`;
 
+/**
+ * Persist a block row.
+ *
+ * @param txCount      OPNET-relevant txs actually stored (interaction + deployment).
+ * @param btcTxCount   Raw Bitcoin block size — all txs in the block, OPNET or not.
+ *                     Pass null when unknown (e.g. historical rows before the
+ *                     column existed).
+ */
 export async function saveBlock(
   db: DbAdapter,
   blockNumber: number,
   blockHash: string,
   timestamp: number | null,
   txCount: number,
+  btcTxCount: number | null = null,
 ): Promise<void> {
-  await db.run(SQL_SAVE_BLOCK, [blockNumber, blockHash, timestamp, txCount]);
+  await db.run(SQL_SAVE_BLOCK, [blockNumber, blockHash, timestamp, txCount, btcTxCount]);
 }
 
 export async function getBlockHash(db: DbAdapter, blockNumber: number): Promise<string | null> {
@@ -448,7 +458,15 @@ export async function scanBlockRange(
             d.blockNumber, d.txHash, d.contractAddr, d.deployer, d.bytecodeHash,
           ]);
         }
-        await db.run(SQL_SAVE_BLOCK, [blockNumber, String(block.hash ?? ''), blockTimestamp, blockTxs.length]);
+        // tx_count = OPNET txs we actually stored (interaction + deployment).
+        // btc_tx_count = raw Bitcoin block size, everything in block.transactions.
+        await db.run(SQL_SAVE_BLOCK, [
+          blockNumber,
+          String(block.hash ?? ''),
+          blockTimestamp,
+          txRows.length,
+          blockTxs.length,
+        ]);
       });
     } catch (err) {
       log('WARN', 'scanner', 'Failed to write block data — skipping', {

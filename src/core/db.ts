@@ -27,11 +27,16 @@ const SCHEMA = `
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 
+-- tx_count is the number of OPNET-relevant txs (interaction + deployment)
+-- actually persisted by the scanner; btc_tx_count is the raw Bitcoin block
+-- size (all txs in the block, OPNET or not). With OPSTREAM_STORE_GENERIC_TXS
+-- off (default) btc_tx_count is typically ~20x larger than tx_count.
 CREATE TABLE IF NOT EXISTS blocks (
-  block_number INTEGER PRIMARY KEY,
-  block_hash   TEXT NOT NULL,
-  timestamp    INTEGER,
-  tx_count     INTEGER NOT NULL DEFAULT 0
+  block_number  INTEGER PRIMARY KEY,
+  block_hash    TEXT NOT NULL,
+  timestamp     INTEGER,
+  tx_count      INTEGER NOT NULL DEFAULT 0,
+  btc_tx_count  INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS transactions (
@@ -255,6 +260,13 @@ function runMigrations(db: Database.Database): void {
         db.exec(`DROP TABLE block_hashes`);
       }
     }
+    // btc_tx_count column added to blocks — existing rows will have NULL
+    // (unknown raw Bitcoin block size). Future scans populate both columns.
+    const blockCols = db.prepare('PRAGMA table_info(blocks)').all() as Array<{ name: string }>;
+    if (blockCols.length > 0 && !blockCols.some(c => c.name === 'btc_tx_count')) {
+      db.exec(`ALTER TABLE blocks ADD COLUMN btc_tx_count INTEGER`);
+    }
+
     // token_deployments → contract_deployments rename. The table always stored
     // every OPNetTransactionTypes.Deployment tx (not only OP-20 tokens), so the
     // old name was misleading. We rename in-place and drop the old indexes;

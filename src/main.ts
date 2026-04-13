@@ -59,6 +59,8 @@ Environment:
   SYNC_SOURCE_URL            Remote OpStream base URL to sync from (for \`sync\` command)
   SYNC_SECRET                Shared secret for /sync/* auth. Unset = open (no auth).
                              Server enforces it; client must present the same value.
+  SYNC_CONCURRENCY           Parallel chunk fetches during sync (default: 4).
+                             Higher = faster on good connections, lower = less load.
 `.trim();
 
 async function openAdapter() {

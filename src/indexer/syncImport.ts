@@ -275,15 +275,47 @@ export async function runSyncImport(
   log('INFO', 'sync', `  Blocks to sync: ${totalToSync}`);
   log('INFO', 'sync', '');
 
+  // Concurrency: how many chunks to fetch in parallel while the previous
+  // batch is being inserted. SYNC_CONCURRENCY env var overrides the default.
+  const concurrency = Math.max(
+    1,
+    parseInt(process.env['SYNC_CONCURRENCY'] ?? '4', 10) || 4,
+  );
+  log('INFO', 'sync', `  Concurrency:    ${concurrency} parallel fetches`);
+  log('INFO', 'sync', '');
+
   const startTime = Date.now();
   let blocksImported = 0;
   const isTTY = process.stdout.isTTY;
 
+  // Sliding-window prefetch: keep `concurrency` fetch requests in flight at
+  // all times. As each chunk is consumed and inserted, a new one is launched
+  // immediately, so network and DB work overlap rather than serialise.
+  const pending = new Map<number, Promise<NdjsonLine[]>>();
+  let nextToFetch = startBlock;
+
+  function enqueueNext(): void {
+    while (pending.size < concurrency && nextToFetch <= remoteTip) {
+      const chunkTo = Math.min(nextToFetch + MAX_BLOCKS_PER_CHUNK - 1, remoteTip);
+      pending.set(nextToFetch, fetchChunk(sourceUrl, secret, nextToFetch, chunkTo));
+      nextToFetch += MAX_BLOCKS_PER_CHUNK;
+    }
+  }
+
+  // Prime the queue before the loop
+  enqueueNext();
+
   for (let from = startBlock; from <= remoteTip; from += MAX_BLOCKS_PER_CHUNK) {
     const to = Math.min(from + MAX_BLOCKS_PER_CHUNK - 1, remoteTip);
 
-    const lines = await fetchChunk(sourceUrl, secret, from, to);
+    // Await the in-flight fetch for this chunk (already started)
+    const lines = await pending.get(from)!;
+    pending.delete(from);
 
+    // Immediately launch the next fetch to keep the pipeline full
+    enqueueNext();
+
+    // Insert this chunk transactionally and advance checkpoint
     await db.transaction(async () => {
       for (const { t, d } of lines) {
         switch (t) {
@@ -294,7 +326,6 @@ export async function runSyncImport(
           case 'out': await insertOutput(db, d); break;
         }
       }
-      // Advance checkpoint to end of this chunk
       await setCheckpoint(db, to);
     });
 

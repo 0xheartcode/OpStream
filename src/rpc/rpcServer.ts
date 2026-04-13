@@ -786,10 +786,17 @@ async function proxyToUpstream(
     return fail(id, { code: INTERNAL_ERROR.code, message: `Upstream proxy error: ${String(e)}` });
   }
 
-  // Upstream returned a non-2xx status (404 for unknown methods, 5xx for
-  // node errors). Surface the status code cleanly instead of blindly trying
-  // to parse whatever non-JSON body the node returned.
+  // Non-2xx: opportunistically preserve the upstream body if it happens to
+  // be a JSON-RPC error (some nodes return errors with non-2xx status).
+  // Otherwise fall back to a synthetic error — nginx HTML pages, empty
+  // bodies, etc. have nothing worth forwarding.
   if (!res.ok) {
+    try {
+      const body = await res.json() as JsonRpcResponse;
+      if (body && typeof body === 'object' && 'error' in body && body.error) {
+        return { jsonrpc: '2.0', id: id ?? null, error: body.error };
+      }
+    } catch { /* fall through to synthetic error */ }
     return fail(id, {
       code: INTERNAL_ERROR.code,
       message: `Upstream returned HTTP ${res.status} for method ${method}`,

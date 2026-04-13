@@ -245,7 +245,20 @@ async function fetchChunk(
   if (!res.ok) throw new Error(`opstream_getBlockRange [${from},${to}] returned HTTP ${res.status}`);
 
   const json = await res.json() as { result?: BatchBlock[]; error?: { message: string } };
-  if (json.error) throw new Error(`opstream_getBlockRange [${from},${to}]: ${json.error.message}`);
+
+  if (json.error) {
+    const msg = json.error.message;
+    // Auto-split on range-too-large errors (tx/event limit exceeded).
+    // Recursively halve until the sub-ranges fit — same pattern Alchemy clients use.
+    if ((msg.includes('transactions') || msg.includes('events')) && msg.includes('limit:') && from < to) {
+      const mid = Math.floor((from + to) / 2);
+      const left  = await fetchChunk(sourceUrl, secret, from, mid);
+      const right = await fetchChunk(sourceUrl, secret, mid + 1, to);
+      return [...left, ...right];
+    }
+    throw new Error(`opstream_getBlockRange [${from},${to}]: ${msg}`);
+  }
+
   return json.result ?? [];
 }
 

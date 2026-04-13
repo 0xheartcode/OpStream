@@ -384,6 +384,14 @@ export async function runBatchScan(
     pending.delete(from);
     enqueueNext();
 
+    // Show "writing..." during DB flush so the user knows we're not stalled
+    const txCount = (blocks as BatchBlock[]).reduce(
+      (n, b) => n + (Array.isArray(b.transactions) ? b.transactions.length : 0), 0,
+    );
+    if (isTTY) {
+      process.stdout.write(`\r\x1B[2K  writing blocks ${from}–${to} (${txCount} txs)...`);
+    }
+
     await db.transaction(async () => {
       for (const block of blocks) {
         const blockNum = parseInt(block.height, 10);

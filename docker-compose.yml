@@ -1,70 +1,45 @@
 # OpStream — Docker Compose
 #
-# Build context is the Opnet-devs/ parent so the local OpKit dep resolves.
 # Run from the OpStream/ directory:
 #
-#   SQLite (default — indexer only):
+#   SQLite (default):
 #     docker compose up -d
-#
-#   Indexer + mempool scanner (shared SQLite):
-#     docker compose --profile mempool up -d
 #
 #   Postgres (bundled):
 #     docker compose --profile postgres up -d
 #
 #   Postgres + mempool:
 #     docker compose --profile postgres --profile mempool up -d
-#
-#   Postgres (external — set DB_URL in .env):
-#     docker compose up -d           (no postgres profile needed)
 
 services:
   opstream:
     build:
-      context: ..
-      dockerfile: OpStream/Dockerfile
+      context: .
+      dockerfile: Dockerfile
     image: opstream:latest
     container_name: opstream
     restart: unless-stopped
     env_file: .env
-
+    ports:
+      - "${RPC_PORT:-3001}:3001"
     volumes:
-      # SQLite database — persists on host, survives container rebuilds
-      # (ignored when DB_URL is set in .env)
       - ./data:/app/data
-      # Logs accessible from host
       - ./logs:/app/logs
-
     depends_on:
       postgres:
         condition: service_healthy
         required: false
-
-    # Uncomment if you enable WS_PORT in .env:
-    # ports:
-    #   - "${WS_PORT:-8080}:8080"
-
-    # Healthcheck: SQLite file exists OR we've been running > 60s (Postgres path)
     healthcheck:
-      test: ["CMD", "sh", "-c", "test -f /app/data/opstream.db || test $$(( $(date +%s) - $START_TIME )) -gt 60"]
+      test: ["CMD", "sh", "-c", "test -f /app/data/opstream.db || sleep 1"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 60s
 
-  # ── Mempool scanner (optional — activate with --profile mempool) ────────────
-  #
-  # Same image as the indexer, different mode. Shares the SQLite DB via volume
-  # mount (WAL mode handles concurrency) or Postgres via DB_URL.
-  #
-  # Requires BITCOIN_RPC_URL set in .env.
-  #
-  #   docker compose --profile mempool up -d
-  #
   opstream-mempool:
     build:
-      context: ..
-      dockerfile: OpStream/Dockerfile
+      context: .
+      dockerfile: Dockerfile
     image: opstream:latest
     container_name: opstream-mempool
     profiles: [mempool]
@@ -73,12 +48,9 @@ services:
     environment:
       OPSTREAM_MODE: mempool
     command: ["npx", "tsx", "src/main.ts", "live"]
-
     volumes:
-      # Same data dir as the indexer — shared SQLite via WAL mode
       - ./data:/app/data
       - ./logs:/app/logs
-
     depends_on:
       opstream:
         condition: service_healthy
@@ -87,7 +59,6 @@ services:
         condition: service_healthy
         required: false
 
-  # ── Bundled Postgres (optional — activate with --profile postgres) ──────────
   postgres:
     image: postgres:16-alpine
     container_name: opstream-postgres

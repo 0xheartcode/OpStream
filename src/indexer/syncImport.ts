@@ -279,7 +279,7 @@ export async function runSyncImport(
   // batch is being inserted. SYNC_CONCURRENCY env var overrides the default.
   const concurrency = Math.max(
     1,
-    parseInt(process.env['SYNC_CONCURRENCY'] ?? '4', 10) || 4,
+    parseInt(process.env['SYNC_CONCURRENCY'] ?? '8', 10) || 8,
   );
   log('INFO', 'sync', `  Concurrency:    ${concurrency} parallel fetches`);
   log('INFO', 'sync', '');

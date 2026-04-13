@@ -384,12 +384,15 @@ export async function runBatchScan(
     pending.delete(from);
     enqueueNext();
 
-    // Show "writing..." during DB flush so the user knows we're not stalled
+    // Only show "writing..." if the DB flush takes > 500ms — fast writes stay silent
     const txCount = (blocks as BatchBlock[]).reduce(
       (n, b) => n + (Array.isArray(b.transactions) ? b.transactions.length : 0), 0,
     );
+    let writeTimer: ReturnType<typeof setTimeout> | null = null;
     if (isTTY) {
-      process.stdout.write(`\r\x1B[2K  writing blocks ${from}–${to} (${txCount} txs)...`);
+      writeTimer = setTimeout(() => {
+        process.stdout.write(`\r\x1B[2K  writing blocks ${from}–${to} (${txCount} txs)...`);
+      }, 500);
     }
 
     await db.transaction(async () => {
@@ -414,6 +417,7 @@ export async function runBatchScan(
       await setCheckpoint(db, to);
     });
 
+    if (writeTimer) clearTimeout(writeTimer);
     blocksScanned += to - from + 1;
 
     const elapsedSec = (Date.now() - startTime) / 1000;

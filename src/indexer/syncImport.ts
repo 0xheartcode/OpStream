@@ -39,9 +39,14 @@ interface NdjsonLine {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Parse a base64 string back into a Buffer for BYTEA columns. */
+/**
+ * Parse a base64 string back into a Buffer for BYTEA columns.
+ * Returns null only for SQL-null values (null/undefined).
+ * An empty base64 string ('') decodes to Buffer(0 bytes) — valid for NOT NULL columns.
+ */
 function b64toBuffer(v: unknown): Buffer | null {
-  if (typeof v !== 'string' || v === '') return null;
+  if (v === null || v === undefined) return null;
+  if (typeof v !== 'string') return null;
   return Buffer.from(v, 'base64');
 }
 

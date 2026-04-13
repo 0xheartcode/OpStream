@@ -12,6 +12,7 @@ import { openAdapter } from '../core/adapter.js';
 import type { DbAdapter } from '../core/dbAdapter.js';
 import { OpnetRpcClient } from '../rpc/opnetRpc.js';
 import { scanBlockRange, getCheckpoint, progressBar, humanElapsed } from './scanner.js';
+import { runSyncImport } from './syncImport.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -32,6 +33,13 @@ export interface BootstrapOptions {
   toBlock?: bigint;
   /** Forwarded to scanBlockRange — see ScanOptions.storeGenericTxs. Default false. */
   storeGenericTxs?: boolean;
+  /**
+   * The OPNET RPC URL the client is pointed at. When this URL responds to
+   * /sync/status (i.e. it is another OpStream instance), bootstrap skips
+   * block-by-block scanning and uses /sync/export instead.
+   * Falls back to OPNET_RPC_URL env var when omitted.
+   */
+  opnetRpcUrl?: string;
 }
 
 export interface BootstrapResult {
@@ -123,9 +131,40 @@ function createProgressDisplay(startBlock: number, totalBlocks: number) {
 // Testable bootstrap core
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// OpStream upstream detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true if the given URL is an OpStream instance that exposes
+ * /sync/status. When true, bootstrap uses runSyncImport() via /sync/export
+ * instead of block-by-block scanning — orders of magnitude faster.
+ */
+async function probeOpStreamUpstream(rpcUrl: string): Promise<boolean> {
+  const base = rpcUrl.replace(/\/api\/v1\/json-rpc\/?$/, '').replace(/\/+$/, '');
+  try {
+    const res = await fetch(`${base}/sync/status`, {
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!res.ok) return false;
+    const body = await res.json() as Record<string, unknown>;
+    return typeof body['tipBlock'] !== 'undefined';
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Testable bootstrap core
+// ---------------------------------------------------------------------------
+
 /**
  * Testable bootstrap core — all dependencies injected.
  * Scans blocks in chunks and stores all chain data.
+ *
+ * When OPNET_RPC_URL responds to /sync/status (i.e. it is an OpStream
+ * instance), bootstrap automatically uses the fast /sync/export path instead
+ * of block-by-block scanning. Falls back to the scanner if the probe fails.
  */
 export async function runBootstrapCore(
   db: DbAdapter,
@@ -139,6 +178,28 @@ export async function runBootstrapCore(
   const storeGenericTxs = opts?.storeGenericTxs ?? false;
   const rps = bootstrapRps ?? 10;
   const minIntervalMs = rps > 0 ? Math.floor(1000 / rps) : 0;
+
+  // Fast path: if the upstream URL is an OpStream instance (responds to
+  // /sync/status), skip block-by-block scanning and use /sync/export instead.
+  // Same data, same result, ~100× fewer HTTP requests.
+  const upstreamUrl = opts?.opnetRpcUrl ?? process.env['OPNET_RPC_URL'] ?? '';
+  if (upstreamUrl) {
+    log('INFO', 'bootstrap', 'Probing upstream for OpStream sync endpoint...');
+    const isOpStream = await probeOpStreamUpstream(upstreamUrl);
+    if (isOpStream) {
+      log('INFO', 'bootstrap', 'OpStream upstream detected — switching to fast /sync/export path');
+      const base = upstreamUrl.replace(/\/api\/v1\/json-rpc\/?$/, '').replace(/\/+$/, '');
+      const result = await runSyncImport(db, {
+        sourceUrl: base,
+        secret:    process.env['SYNC_SECRET'] ?? null,
+      });
+      return {
+        blocksScanned: result.blocksImported,
+        eventsStored:  0,
+      };
+    }
+    log('INFO', 'bootstrap', 'Upstream is not OpStream — using block-by-block scanner');
+  }
 
   const currentBlock = await client.getBlockNumber();
 
@@ -239,6 +300,7 @@ export async function runBootstrap(): Promise<void> {
       fromBlock:       effectiveFromBlock,
       toBlock:         config.bootstrapToBlock,
       storeGenericTxs: config.storeGenericTxs,
+      opnetRpcUrl:     config.opnetRpcUrl,
     },
     config.bootstrapRps,
   );
@@ -260,7 +322,7 @@ export async function runCatchup(): Promise<void> {
 
   const result = await runBootstrapCore(
     db, client,
-    { chunkSize: config.bootstrapChunkSize },
+    { chunkSize: config.bootstrapChunkSize, opnetRpcUrl: config.opnetRpcUrl },
     config.bootstrapRps,
   );
 

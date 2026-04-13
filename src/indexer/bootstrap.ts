@@ -8,7 +8,7 @@
 
 import { log } from '../core/logger.js';
 import { loadConfig } from '../core/config.js';
-import { openDb } from '../core/db.js';
+import { openAdapter } from '../core/adapter.js';
 import type { DbAdapter } from '../core/dbAdapter.js';
 import { OpnetRpcClient } from '../rpc/opnetRpc.js';
 import { scanBlockRange, getCheckpoint, progressBar, humanElapsed } from './scanner.js';
@@ -102,7 +102,7 @@ function createProgressDisplay(startBlock: number, totalBlocks: number) {
         `${overallBps.toFixed(1)} blk/s  ETA ${humanElapsed(overallEta)}`;
 
       if (active) {
-        // Move up 1 line, overwrite both lines (no trailing newline keeps cursor on chunk line)
+        // Mote up 1 line, overwrite both lines (no trailing newline keeps cursor on chunk line)
         process.stdout.write(`\x1B[1A\r\x1B[2K${overallLine}\n\r\x1B[2K${chunkLine}`);
       } else {
         process.stdout.write(`${overallLine}\n${chunkLine}`);
@@ -145,9 +145,6 @@ export async function runBootstrapCore(
   const checkpoint = await getCheckpoint(db);
   const startBlock = fromBlockOverride > 0n ? fromBlockOverride : checkpoint + 1n;
 
-  // Cap at toBlock if set, otherwise scan to chain tip.
-  // toBlockCap is clamped to currentBlock so requesting a future block
-  // just stops at the tip.
   const endBlockInclusive = toBlockCap > 0n
     ? (toBlockCap < currentBlock ? toBlockCap : currentBlock)
     : currentBlock;
@@ -155,7 +152,8 @@ export async function runBootstrapCore(
   if (toBlockCap > 0n && toBlockCap < startBlock) {
     throw new Error(
       `BOOTSTRAP_TO_BLOCK (${toBlockCap}) is less than start block (${startBlock}). ` +
-      `Set BOOTSTRAP_TO_BLOCK >= BOOTSTRAP_FROM_BLOCK, or unset it to scan to chain tip.`,
+      `Set BOOTSTRAP_TO_BLOCK >= BOOTSTRAP_FROM_BLOCK, or
+ unset it to scan to chain tip.`,
     );
   }
 
@@ -179,7 +177,6 @@ export async function runBootstrapCore(
   let totalEvents = 0;
   let totalBlocks = 0;
 
-  // Two-line rewriting display on TTY; falls back to log() in scanner when null
   const display = createProgressDisplay(Number(startBlock), totalRange);
 
   for (let chunkStart = startBlock; chunkStart <= endBlockInclusive; chunkStart += chunkSize) {
@@ -219,17 +216,11 @@ export async function runBootstrapCore(
 // CLI entry points
 // ---------------------------------------------------------------------------
 
-/**
- * Called by `npx tsx src/main.ts bootstrap`.
- */
 export async function runBootstrap(): Promise<void> {
   const config = loadConfig();
-  const db = openDb(config.dbPath);
+  const db = await openAdapter();
   const client = new OpnetRpcClient(config.opnetRpcUrl);
 
-  // BOOTSTRAP_FROM_BLOCK is a floor for cold starts only: if a checkpoint
-  // already exists we resume from it, so `start` is always idempotent and
-  // never re-scans blocks that were already indexed.
   const checkpoint = await getCheckpoint(db);
   const effectiveFromBlock = checkpoint > 0n ? 0n : config.bootstrapFromBlock;
 
@@ -260,12 +251,12 @@ export async function runBootstrap(): Promise<void> {
 
 export async function runCatchup(): Promise<void> {
   const config = loadConfig();
-  const db = openDb(config.dbPath);
+  const db = await openAdapter();
   const client = new OpnetRpcClient(config.opnetRpcUrl);
 
   log('INFO', 'bootstrap', 'Catchup starting (incremental — from last checkpoint)', {
     dbPath: config.dbPath,
-  });
+    });
 
   const result = await runBootstrapCore(
     db, client,

@@ -195,4 +195,4 @@ const indexer = await createIndexer({ schema, sink, source });
 await indexer.subscribe(fromBlock);
 ```
 
-See [opkit-integration.md](./opkit-integration.md) for the full op-index setup guide.
+See [op-index-integration.md](./op-index-integration.md) for the full op-index setup guide.

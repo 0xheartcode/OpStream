@@ -341,7 +341,7 @@ manager.on('broadcast', (event) => {
 op-index reads directly from OpStream's database (source, read-only) and writes derived,
 indexed state into its own database (sink). The two are physically separate: a separate
 SQLite file, or — in Docker — a separate logical database on the same Postgres instance
-(`CREATE DATABASE opstream` and `CREATE DATABASE opkit`). OpStream is never written to by
+(`CREATE DATABASE opstream` and `CREATE DATABASE opindex`). OpStream is never written to by
 op-index, and op-index can be wiped and re-derived from the raw archive without touching it.
 
 Decoding lives entirely in op-index. Each event is decoded at read time via op-index's
@@ -607,7 +607,7 @@ just check         # typecheck + lint + test in one shot
 | [docs/websocket.md](./docs/websocket.md) | WS client setup, full enriched payload schema, multi-client |
 | [docs/webhooks.md](./docs/webhooks.md) | HTTP delivery, programmatic subscriptions, pattern matching, retry |
 | [docs/querying.md](./docs/querying.md) | SQL patterns, full schema reference, compound query examples |
-| [docs/opkit-integration.md](./docs/opkit-integration.md) | Tier 1/2/3 event sources, ABI decoder injection, DB layout |
+| [docs/op-index-integration.md](./docs/op-index-integration.md) | Tier 1/2/3 event sources, ABI decoder injection, DB layout |
 
 ## Contributing
 

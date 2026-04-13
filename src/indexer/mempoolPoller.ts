@@ -101,8 +101,8 @@ export interface MempoolPollerHandle {
 // ─── DB helpers ──────────────────────────────────────────────────────────────
 
 const INSERT_MEMPOOL_PENDING = `
-  INSERT OR IGNORE INTO mempool_pending (txid, raw_payload_hex, contract_selector, decoded_json)
-  VALUES (?, ?, ?, ?)
+  INSERT OR IGNORE INTO mempool_pending (txid, raw_payload_hex, contract_selector)
+  VALUES (?, ?, ?)
 `;
 
 // ─── startMempoolPoller ──────────────────────────────────────────────────────
@@ -192,7 +192,6 @@ export function startMempoolPoller(
               txid,
               payload.payloadHex,
               payload.selectorHex,
-              null, // decoded_json — future OpKit integration
             ]);
           } catch (err) {
             log('WARN', 'mempool', 'Failed to insert mempool_pending row', {
@@ -208,7 +207,6 @@ export function startMempoolPoller(
               txHash:          txid,
               contractAddress: payload.selectorHex ?? '',
               eventName:       'MempoolPending',
-              decodedJson:     null,
               failed:          false,
             };
             onMempoolEvent(event);

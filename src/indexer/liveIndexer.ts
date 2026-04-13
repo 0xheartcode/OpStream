@@ -192,7 +192,11 @@ export function startLiveIndexer(
         }
       } else {
         const blocksAhead = Number(toBlock - fromBlock + 1n);
-        log('INFO', 'live', `New blocks  ${Number(fromBlock)}..${Number(toBlock)} (+${blocksAhead})`);
+        if (blocksAhead === 1) {
+          log('INFO', 'live', `New block  ${Number(fromBlock)} (+1)`);
+        } else {
+          log('INFO', 'live', `New blocks  ${Number(fromBlock)}..${Number(toBlock)} (+${blocksAhead})`);
+        }
 
         const result = scanFn
           ? await scanFn(db, client, fromBlock, toBlock)

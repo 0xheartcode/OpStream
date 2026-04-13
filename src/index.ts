@@ -38,7 +38,7 @@ export { runBootstrap, runBootstrapCore, runCatchup, queryContractDeployments } 
 export type { BootstrapOptions, BootstrapResult, ContractDeploymentRow } from './indexer/bootstrap.js';
 
 // Event store
-export { insertEvent, insertEventsBatch, queryEvents, backfillDecoded } from './indexer/eventStore.js';
+export { insertEvent, insertEventsBatch, queryEvents } from './indexer/eventStore.js';
 export type { EventRow, EventInput, EventQuery } from './indexer/eventStore.js';
 
 // Live indexer

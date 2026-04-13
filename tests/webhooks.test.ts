@@ -14,7 +14,6 @@ function enrichedEvent(overrides: Partial<WebhookEvent> = {}): WebhookEvent {
     txHash:          'tx_abc',
     contractAddress: 'bc1qcontract',
     eventName:       'Transfer',
-    decodedJson:     '{"amount":"1000"}',
     logIndex:        0,
     blockTimestamp:  1_700_000_000,
     txIndex:         2,
@@ -78,7 +77,6 @@ describe('SubscriptionManager', () => {
       expect(e.txHash).toBe('tx_abc');
       expect(e.contractAddress).toBe('bc1qcontract');
       expect(e.eventName).toBe('Transfer');
-      expect(e.decodedJson).toBe('{"amount":"1000"}');
     });
 
     it('emits all enriched fields on broadcast', () => {
@@ -211,16 +209,6 @@ describe('SubscriptionManager', () => {
     it('matches on eventName', () => {
       expect(manager.matchesPattern({ eventName: 'Transfer' }, event)).toBe(true);
       expect(manager.matchesPattern({ eventName: 'Swap' }, event)).toBe(false);
-    });
-
-    it('matches on minAmount from decodedJson', () => {
-      expect(manager.matchesPattern({ minAmount: 500n }, event)).toBe(true);
-      expect(manager.matchesPattern({ minAmount: 1000n }, event)).toBe(true);
-      expect(manager.matchesPattern({ minAmount: 1001n }, event)).toBe(false);
-    });
-
-    it('does not match minAmount when decodedJson is null', () => {
-      expect(manager.matchesPattern({ minAmount: 0n }, enrichedEvent({ decodedJson: null }))).toBe(false);
     });
 
     it('enriched fields do not interfere with pattern matching', () => {

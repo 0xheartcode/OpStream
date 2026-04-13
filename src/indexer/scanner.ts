@@ -72,7 +72,6 @@ export type OnEventCallback = (event: {
   txHash:          string;
   contractAddress: string;
   eventName:       string;
-  decodedJson:     string | null;
   logIndex:        number;
   blockTimestamp:  number;
   txIndex:         number;
@@ -84,23 +83,11 @@ export type OnEventCallback = (event: {
   eventRaw:        string;
 }) => void;
 
-/**
- * Optional ABI decoder injected by the caller.
- * Returns a plain object on success, null if the event type is unknown.
- * When omitted, decodedJson is always stored as null.
- */
-export type EventDecoder = (eventType: string, data: Buffer) => Record<string, unknown> | null;
-
 export interface ScanOptions {
   /** Minimum milliseconds between RPC calls (rate limiting). */
   minIntervalMs?: number;
   /** Called for each event after it's stored. */
   onEvent?: OnEventCallback;
-  /**
-   * ABI decoder for event payloads. Populate decodedJson in the DB.
-   * OpKit consumers pass their decodeEvent here; standalone OpStream leaves it unset.
-   */
-  decode?: EventDecoder;
   /**
    * Called every ~10 blocks with (doneInChunk, chunkProgressLine).
    * When provided, scanner skips its own log() for progress — the caller
@@ -305,8 +292,8 @@ export async function deleteBlockDataFrom(db: DbAdapter, fromBlock: number): Pro
 
 const SQL_INSERT_EVENT = `
   INSERT INTO events
-    (block_number, tx_hash, contract_address, event_name, log_index, event_raw, decoded_json, data_length)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    (block_number, tx_hash, contract_address, event_name, log_index, event_raw, data_length)
+  VALUES (?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT DO NOTHING
 `;
 
@@ -341,7 +328,8 @@ const SQL_INSERT_DEPLOY = `
  * Scan a range of blocks, store all events and token deployments.
  *
  * This is the pure, generic scanner — no DEX knowledge, no pool discovery.
- * It fetches each block from RPC, decodes events, and stores them.
+ * It fetches each block from RPC and stores raw event bytes. Decoding is the
+ * consumer's job (e.g. OpKit reads event_raw and applies its decoder registry).
  *
  * All writes for a single block are batched in one transaction to avoid
  * lock contention and improve throughput.
@@ -355,7 +343,6 @@ export async function scanBlockRange(
 ): Promise<ScanResult> {
   const minIntervalMs = opts?.minIntervalMs ?? 0;
   const onEvent = opts?.onEvent;
-  const decode = opts?.decode ?? null;
   const storeGenericTxs = opts?.storeGenericTxs ?? false;
   const startTime = Date.now();
   let lastCallTime = 0;
@@ -494,7 +481,6 @@ export async function scanBlockRange(
         for (const [evContractAddr, evts] of Object.entries(tx.events)) {
           for (const event of evts) {
             const rawData = Buffer.from(event.data);
-            const decoded = decode ? decode(event.type, rawData) : null;
             events.push({
               blockNumber,
               txHash:         itx.id,
@@ -502,7 +488,6 @@ export async function scanBlockRange(
               eventName:      event.type,
               logIndex:       logIndex++,
               rawData,
-              decodedJson:    decoded ? JSON.stringify(decoded) : null,
               blockTimestamp,
               txIndex,
               fromAddress,
@@ -543,7 +528,7 @@ export async function scanBlockRange(
         for (const e of events) {
           await db.run(SQL_INSERT_EVENT, [
             e.blockNumber, e.txHash, e.contractAddress, e.eventName, e.logIndex,
-            e.rawData, e.decodedJson ?? null, e.rawData.length,
+            e.rawData, e.rawData.length,
           ]);
         }
         for (const d of deployments) {
@@ -616,7 +601,6 @@ export async function scanBlockRange(
           txHash:          e.txHash,
           contractAddress: e.contractAddress,
           eventName:       e.eventName,
-          decodedJson:     e.decodedJson ?? null,
           logIndex:        e.logIndex,
           blockTimestamp:  e.blockTimestamp,
           txIndex:         e.txIndex,

@@ -1,9 +1,9 @@
 # OpStream
 
-[![CI](https://github.com/opnet-devs/opstream/actions/workflows/ci.yml/badge.svg)](https://github.com/opnet-devs/opstream/actions/workflows/ci.yml)
+[![CI](https://github.com/opnet-collective/opstream/actions/workflows/ci.yml/badge.svg)](https://github.com/opnet-collective/opstream/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-Pure Layer 2 chain scanner for OPNET.
+Self-hosted archival node for OPNET.
 
 ## The Problem
 
@@ -31,14 +31,13 @@ const events = queryEvents(db, { contract: myContract, eventName: 'Swapped' });
 ## Architecture
 
 ```
-Layer 4:  Apps           (your-app, OpScope)
-Layer 3:  OpKit          Indexer framework — defineSchema, createIndexer, event handlers
-Layer 2:  OpStream       Raw data pipeline — scan blocks, store chain data, push events
-Layer 1:  opnet SDK      RPC client — talk to one node
-Layer 0:  OPNET node
+Layer 3:  Apps           (your-app, OpScope)
+Layer 2:  OpKit          Indexer framework — defineSchema, createIndexer, event handlers
+Layer 1:  OpStream       Self-hosted archival node — scans once, serves btc_* locally, raw event store
+Layer 0:  OPNET node     Live chain
 ```
 
-OpStream is the [Subsquid Archive](https://github.com/subsquid/squid-sdk) of OPNET: a self-hosted data layer that scans once so every consumer queries instantly. OpKit is the handler framework (equivalent to Subsquid's SDK or Ponder's handler layer) that gives the raw data meaning.
+OpStream is the [Subsquid Archive](https://github.com/subsquid/squid-sdk) of OPNET: a self-hosted archival node that scans once so every consumer queries instantly. It stores raw event bytes and never decodes them — decoding belongs in OpKit (Layer 2), where each consumer plugs in its own ABI registry.
 
 ## Quick Start
 
@@ -64,13 +63,12 @@ Run with `npx vitest run` (148 tests across 8 suites):
 
 | Suite | Feature | Coverage |
 |-------|---------|----------|
-| `eventStore` | `insertEvent` | insert + read-back, null `decoded_json`, duplicate silently ignored |
-| `eventStore` | `insertEventsBatch` | multi-event, empty array, within-batch dedup, `decoded_json` roundtrip |
+| `eventStore` | `insertEvent` | insert + read-back, raw bytes preserved, duplicate silently ignored |
+| `eventStore` | `insertEventsBatch` | multi-event, empty array, within-batch dedup |
 | `eventStore` | `queryEvents` | all-events, by contract, by name, by block range, combined filters, empty result, ordering |
-| `eventStore` | `backfillDecoded` | decodes + updates, skips already-decoded, null decoder, scoped to contract+event |
 | `webhooks` | `dispatch()` → broadcast | all enriched fields delivered via EventEmitter |
 | `webhooks` | `dispatch()` → WebSocket | valid RFC 6455 frame, all fields present in parsed JSON |
-| `webhooks` | `matchesPattern()` | contract, eventName, minAmount, combined, no regression from enriched fields |
+| `webhooks` | `matchesPattern()` | contract, eventName, combined, no regression from enriched fields |
 | `webhooks` | HTTP delivery + retry | POST body contains enriched fields; 4-attempt retry sequence |
 | `webhooks` | Server lifecycle | idempotent start, client eviction on write error, stop cleans up |
 | `scanner` | `onEvent` enrichment | logIndex, blockTimestamp, txIndex, fromAddress, gasUsed, burnedBitcoin, failed, revertReason, eventRaw |
@@ -88,7 +86,7 @@ These have been run against mainnet and produce correct output:
 - Rate limiting via `BOOTSTRAP_RPS` (default 10 req/s)
 - Single SQLite transaction per block — all-or-nothing write; skips block on failure with `WARN` log
 - Saves `scan_checkpoints` every chunk end so a crash loses at most one chunk
-- Detects and stores: blocks, transactions, tx_outputs, events (raw + decoded), token deployments
+- Detects and stores: blocks, transactions, tx_outputs, raw event bytes, contract deployments
 
 **Live indexer** (`just live` / `npx tsx src/main.ts live`)
 - Polls `getBlockNumber()` every 30 s, scans `[checkpoint+1, chainTip]` each cycle
@@ -119,7 +117,7 @@ These have been run against mainnet and produce correct output:
 - `contract_deployments` captured for every `deployment` tx (deployer address, bytecode SHA-256 hash prefix)
 
 **SubscriptionManager / webhooks** (`src/indexer/webhooks.ts`)
-- Pattern matching: `contract` (case-insensitive), `eventName`, `minAmount` (from `decoded_json`)
+- Pattern matching: `contract` (case-insensitive), `eventName`. Payload-aware filters (e.g. minimum amount) belong in the consumer (OpKit handlers) since OpStream stores raw bytes only.
 - HTTP POST delivery with 3 retries, exponential backoff (1 s → 2 s → 4 s), 5 s per-request timeout
 - `WEBHOOK_URLS` env var auto-registers comma-separated URLs as catch-all subscriptions on startup
 - Emits `'broadcast'` EventEmitter event for in-process consumers
@@ -209,7 +207,7 @@ Pool discovery logic (`processNativeSwapPools`, `processMotoswapPools`, etc.) wa
 | `blocks` | Full archival block metadata — hash, timestamp, `tx_count` (raw Bitcoin block size), `opnet_tx_count` (OPNET txs we persisted), plus every `IBlockCommon` field needed to serve `btc_getBlockByNumber` / `btc_getBlockByHash` locally with the exact upstream shape (`previous_block_hash`, `previous_block_checksum`, `bits`, `nonce`, `version`, `size`, `weight`, `stripped_size`, `median_time`, `checksum_root`, `merkle_root`, `storage_root`, `receipt_root`, `ema`, `base_gas`, `block_gas_used`, `checksum_proofs`). |
 | `transactions` | OPNET-relevant txs — sender, gas, fees, calldata, revert status, plus `receipt` + `receipt_proofs` for `btc_getTransactionReceipt` archival parity. Non-OPNET Bitcoin txs are skipped by default (see `OPSTREAM_STORE_GENERIC_TXS`). |
 | `tx_outputs` | Bitcoin UTXO outputs per tx — value flows in satoshis |
-| `events` | Every decoded event from every contract |
+| `events` | Raw event bytes from every contract — decoding is OpKit's job, applied at read time |
 | `scan_checkpoints` | Scanner progress (resumable) |
 | `contract_deployments` | Contract creation tracking |
 | `tokens` | OP20 metadata cache — written by OpKit, not OpStream |
@@ -262,7 +260,7 @@ SQLite WAL mode. Single file at `data/opstream.db`.
 ## Querying
 
 ```typescript
-import { openDb, queryEvents } from '@opnet-devs/opstream';
+import { openDb, queryEvents } from '@opnet-collective/opstream';
 
 const db = openDb('data/opstream.db');
 
@@ -304,9 +302,9 @@ WS_PORT=8080 npx tsx src/main.ts start
 const ws = new WebSocket('ws://localhost:8080');
 ws.onmessage = (msg) => {
   const event = JSON.parse(msg.data);
-  // event carries: blockNumber, txHash, contractAddress, eventName, decodedJson,
+  // event carries: blockNumber, txHash, contractAddress, eventName,
   // logIndex, txIndex, blockTimestamp, fromAddress, gasUsed, burnedBitcoin,
-  // failed, revertReason, eventRaw
+  // failed, revertReason, eventRaw (hex)
   console.log(event.eventName, event.contractAddress, event.blockNumber);
 };
 ```
@@ -324,7 +322,7 @@ Each indexed event triggers a POST with JSON body. 3 retries with exponential ba
 ### Programmatic
 
 ```typescript
-import { getWebhookManager } from '@opnet-devs/opstream';
+import { getWebhookManager } from '@opnet-collective/opstream';
 
 const manager = getWebhookManager();
 
@@ -340,12 +338,18 @@ manager.on('broadcast', (event) => {
 
 ## How OpKit Consumes OpStream
 
-OpKit reads directly from OpStream's database (source) and writes derived, indexed state into
-its own tables (sink). The two databases can be separate SQLite files or the same Postgres
-database — OpKit's `opkit_*` table prefix prevents collisions either way.
+OpKit reads directly from OpStream's database (source, read-only) and writes derived,
+indexed state into its own database (sink). The two are physically separate: a separate
+SQLite file, or — in Docker — a separate logical database on the same Postgres instance
+(`CREATE DATABASE opstream` and `CREATE DATABASE opkit`). OpStream is never written to by
+OpKit, and OpKit can be wiped and re-derived from the raw archive without touching it.
+
+Decoding lives entirely in OpKit. Each event is decoded at read time via OpKit's
+`DECODER_REGISTRY` — adding a new ABI decoder instantly applies to all historical raw
+events, with no rewrite of the OpStream database required.
 
 ```typescript
-import { defineSchema, createIndexer, DbEventSource, openSqlite } from '@opnet-devs/opkit';
+import { defineSchema, createIndexer, DbEventSource, openSqlite } from '@opnet-collective/opkit';
 
 const schema = defineSchema({
   Transfer: {
@@ -510,11 +514,11 @@ fails (corrupted data, different compression scheme), it falls back to returning
 compressed bytes — downstream consumers can still detect the OPNET tx even without
 decoding its payload.
 
-**No calldata ABI decoding yet:** The `decoded_json` column in `mempool_pending` is always
-`NULL`. Decoding pending calldata into structured function calls (e.g., "this is a
-`reserveTokens(tokenX, 5000 sats)`") requires function selector constants and parameter
-layouts from OpKit. This is the next step — `calldataDecoders.ts` in OpKit, mirroring the
-existing `eventDecoders.ts` pattern.
+**No calldata ABI decoding here:** OpStream stores `raw_payload_hex` and `contract_selector`
+only. Decoding pending calldata into structured function calls (e.g., "this is a
+`reserveTokens(tokenX, 5000 sats)`") is OpKit's responsibility — it owns the function
+selector constants and parameter layouts via its `calldataDecoders.ts` registry, mirroring
+the existing `eventDecoders.ts` pattern.
 
 **First-poll burst:** On startup, the poller sees the entire current mempool as "new" and
 fetches raw hex for all txids. With a 50-concurrent batch limit this is manageable but
@@ -538,7 +542,6 @@ enhancement.
 | `txid` | TEXT PK | Bitcoin transaction ID |
 | `raw_payload_hex` | TEXT | Decompressed OPNET calldata as hex |
 | `contract_selector` | TEXT | First 4 bytes of payload (function selector), e.g. `0xdeadbeef` |
-| `decoded_json` | TEXT | Structured decode — NULL until OpKit decoders are wired |
 | `first_seen_at` | INTEGER | Unix timestamp when first detected in mempool |
 | `confirmed_at` | INTEGER | Unix timestamp when confirmed in a block (NULL = still pending) |
 | `pruned_at` | INTEGER | Soft-prune timestamp for old entries |

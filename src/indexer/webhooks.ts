@@ -8,7 +8,9 @@
  * Pattern matching (all fields optional, ANDed):
  *   contract   — exact case-insensitive address match
  *   eventName  — exact event name match  (e.g. 'Swapped', 'SwapExecuted')
- *   minAmount  — minimum amount in the decoded JSON (field 'amount' or 'amount0In')
+ *
+ * OpStream stores raw event bytes only — payload-aware filters (e.g. minimum
+ * amount) belong in the consumer (OpKit handlers or the downstream service).
  *
  * Delivery:
  *   - HTTP POST with JSON body (fetch-based, 5s timeout)
@@ -41,11 +43,6 @@ export interface EventPattern {
   contract?: string;
   /** If set, only match events with this exact event name. */
   eventName?: string;
-  /**
-   * If set, only match events where the decoded JSON contains an 'amount' or
-   * 'amount0In' field >= minAmount.
-   */
-  minAmount?: bigint;
 }
 
 /** Normalized on-chain event for webhook delivery. */
@@ -55,9 +52,8 @@ export interface WebhookEvent {
   txHash:          string;
   contractAddress: string;
   eventName:       string;
-  decodedJson:     string | null;
 
-  // Enriched fields (optional — added for WebSocket / OpKit Tier-2 consumers):
+  // Enriched fields (optional — added for WebSocket / op-index Tier-2 consumers):
   logIndex?:       number;              // position of this event within its transaction
   blockTimestamp?: number;              // unix timestamp of the containing block
   txIndex?:        number;              // position of the transaction within the block
@@ -129,21 +125,6 @@ export class SubscriptionManager extends EventEmitter {
 
     if (pattern.eventName !== undefined && pattern.eventName !== event.eventName) {
       return false;
-    }
-
-    if (pattern.minAmount !== undefined) {
-      if (!event.decodedJson) return false;
-      try {
-        const parsed = JSON.parse(event.decodedJson) as Record<string, unknown>;
-        const raw =
-          (parsed['amount'] as string | undefined) ??
-          (parsed['amount0In'] as string | undefined) ??
-          '0';
-        const amount = BigInt(raw);
-        if (amount < pattern.minAmount) return false;
-      } catch {
-        return false;
-      }
     }
 
     return true;

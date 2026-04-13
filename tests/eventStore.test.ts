@@ -6,7 +6,6 @@ import {
   insertEvent,
   insertEventsBatch,
   queryEvents,
-  backfillDecoded,
 } from '../src/indexer/eventStore.js';
 
 describe('eventStore', () => {
@@ -28,7 +27,7 @@ describe('eventStore', () => {
   describe('insertEvent', () => {
     it('inserts an event and can be read back', async () => {
       const raw = Buffer.from('deadbeef', 'hex');
-      await insertEvent(db, 100, 'tx1', 'contract1', 'Transferred', raw, '{"amount":"42"}');
+      await insertEvent(db, 100, 'tx1', 'contract1', 'Transferred', raw);
 
       const row = rawGet('SELECT * FROM events WHERE tx_hash = ?', 'tx1');
       expect(row).toBeDefined();
@@ -37,15 +36,15 @@ describe('eventStore', () => {
       expect(row.contract_address).toBe('contract1');
       expect(row.event_name).toBe('Transferred');
       expect(row.data_length).toBe(4);
-      expect(row.decoded_json).toBe('{"amount":"42"}');
     });
 
-    it('stores event with null decoded_json', async () => {
-      const raw = Buffer.from('cafe', 'hex');
+    it('persists raw event bytes verbatim', async () => {
+      const raw = Buffer.from('cafebabe', 'hex');
       await insertEvent(db, 100, 'tx1', 'contract1', 'Unknown', raw);
 
-      const row = rawGet('SELECT * FROM events WHERE tx_hash = ?', 'tx1');
-      expect(row.decoded_json).toBeNull();
+      const row = rawGet('SELECT event_raw, data_length FROM events WHERE tx_hash = ?', 'tx1');
+      expect(Buffer.from(row.event_raw).toString('hex')).toBe('cafebabe');
+      expect(row.data_length).toBe(4);
     });
 
     it('silently ignores duplicate (UNIQUE constraint)', async () => {
@@ -96,16 +95,6 @@ describe('eventStore', () => {
 
       const count = rawGet('SELECT COUNT(*) as cnt FROM events');
       expect(count.cnt).toBe(1);
-    });
-
-    it('stores decoded_json when provided', async () => {
-      const events = [
-        { blockNumber: 100, txHash: 'tx1', contractAddress: 'c1', eventName: 'Synced', rawData: Buffer.from('aa', 'hex'), decodedJson: '{"r0":"100"}' },
-      ];
-      await insertEventsBatch(db, events);
-
-      const row = rawGet('SELECT decoded_json FROM events WHERE tx_hash = ?', 'tx1');
-      expect(row.decoded_json).toBe('{"r0":"100"}');
     });
   });
 
@@ -161,73 +150,4 @@ describe('eventStore', () => {
       }
     });
   });
-
-  describe('backfillDecoded', () => {
-    it('decodes raw events and updates decoded_json', async () => {
-      await insertEvent(db, 100, 'tx1', 'c1', 'Synced', Buffer.from('00000064000000c8', 'hex'));
-      await insertEvent(db, 101, 'tx2', 'c1', 'Synced', Buffer.from('000000c80000012c', 'hex'));
-
-      const decoder = (raw: Buffer) => {
-        const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
-        return {
-          r0: view.getUint32(0).toString(),
-          r1: view.getUint32(4).toString(),
-        };
-      };
-
-      const count = await backfillDecoded(db, 'c1', 'Synced', decoder);
-      expect(count).toBe(2);
-
-      const rows = await queryEvents(db, { contract: 'c1', eventName: 'Synced' });
-      expect(rows[0].decoded_json).not.toBeNull();
-      const parsed = JSON.parse(rows[0].decoded_json!);
-      expect(parsed.r0).toBe('100');
-      expect(parsed.r1).toBe('200');
-    });
-
-    it('skips rows that already have decoded_json', async () => {
-      await insertEvent(db, 100, 'tx1', 'c1', 'Synced', Buffer.from('aabb', 'hex'), '{"existing":true}');
-
-      const count = await backfillDecoded(db, 'c1', 'Synced', () => ({ new: true }));
-      expect(count).toBe(0);
-
-      const row = rawGet('SELECT decoded_json FROM events WHERE tx_hash = ?', 'tx1');
-      expect(JSON.parse(row.decoded_json)).toEqual({ existing: true });
-    });
-
-    it('handles decoder returning null (malformed data)', async () => {
-      await insertEvent(db, 100, 'tx1', 'c1', 'Synced', Buffer.from('aa', 'hex'));
-
-      const decoder = (raw: Buffer) => {
-        if (raw.length < 8) return null;
-        return { ok: true };
-      };
-
-      const count = await backfillDecoded(db, 'c1', 'Synced', decoder);
-      expect(count).toBe(0);
-
-      const row = rawGet('SELECT decoded_json FROM events WHERE tx_hash = ?', 'tx1');
-      expect(row.decoded_json).toBeNull();
-    });
-
-    it('returns 0 when no matching events', async () => {
-      const count = await backfillDecoded(db, 'nonexistent', 'Synced', () => ({ ok: true }));
-      expect(count).toBe(0);
-    });
-
-    it('only updates events for the specified contract+event', async () => {
-      await insertEvent(db, 100, 'tx1', 'c1', 'Synced', Buffer.from('aabb', 'hex'));
-      await insertEvent(db, 100, 'tx2', 'c2', 'Synced', Buffer.from('ccdd', 'hex'));
-      await insertEvent(db, 100, 'tx3', 'c1', 'Transferred', Buffer.from('eeff', 'hex'));
-
-      await backfillDecoded(db, 'c1', 'Synced', () => ({ decoded: true }));
-
-      const c2Row = rawGet('SELECT decoded_json FROM events WHERE tx_hash = ?', 'tx2');
-      expect(c2Row.decoded_json).toBeNull();
-
-      const transferRow = rawGet('SELECT decoded_json FROM events WHERE tx_hash = ?', 'tx3');
-      expect(transferRow.decoded_json).toBeNull();
-    });
-  });
-
 });

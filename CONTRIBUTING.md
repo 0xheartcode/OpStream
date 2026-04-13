@@ -16,7 +16,7 @@ environment and what we expect in a pull request.
 ## Getting started
 
 ```bash
-git clone https://github.com/opnet-devs/opstream.git
+git clone https://github.com/opnet-collective/opstream.git
 cd opstream
 npm install
 cp .env.example .env   # fill in RPC_URL at minimum

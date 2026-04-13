@@ -36,7 +36,7 @@ OpKit queries OpStream's `events`, `transactions`, and `blocks` tables directly.
 Lowest setup complexity; 10–30 s latency behind chain tip.
 
 ```typescript
-import { DbEventSource, openSqlite } from '@opnet-devs/opkit';
+import { DbEventSource, openSqlite } from '@opnet-collective/opkit';
 
 const source = new DbEventSource(openSqlite('data/opstream.db'));
 ```
@@ -50,7 +50,7 @@ OpKit connects to OpStream's WebSocket broadcast and receives events as they are
 No shared filesystem required. Suitable for running OpStream and OpKit on different hosts.
 
 ```typescript
-import { createEventSource } from '@opnet-devs/opkit';
+import { createEventSource } from '@opnet-collective/opkit';
 
 const source = createEventSource({
   type: 'ws',
@@ -66,7 +66,7 @@ OpKit fetches directly from the OPNET RPC node. No OpStream needed; slowest by f
 Useful only for testing or when OpStream is not available.
 
 ```typescript
-import { RpcEventSource } from '@opnet-devs/opkit';
+import { RpcEventSource } from '@opnet-collective/opkit';
 
 const source = new RpcEventSource({ rpcUrl: 'https://mainnet.opnet.org' });
 ```
@@ -82,7 +82,7 @@ import {
   DbEventSource,
   openSqlite,
   SqliteAdapter,
-} from '@opnet-devs/opkit';
+} from '@opnet-collective/opkit';
 
 // ── 1. Schema ────────────────────────────────────────────────────────────────
 // Define the entities OpKit will index and the fields they carry.
@@ -152,33 +152,21 @@ const stop = indexer.subscribe(currentBlock + 1);
 
 ## ABI Decoding
 
-OpStream stores `event_raw` (the raw bytes) and optionally `decoded_json` (ABI-decoded
-fields as JSON). `decoded_json` is only populated if a decoder was injected at scan time.
+OpStream stores raw event bytes only — `event_raw` is the source of truth and there is
+no `decoded_json` column. Decoding happens entirely in OpKit, at read time, via the
+`DECODER_REGISTRY`. This means:
 
-### Injecting a Decoder into OpStream
-
-OpStream's `scanBlockRange` accepts an optional `decode` function via `ScanOptions`.
-When provided, it is called for each event and the result is stored in `decoded_json`.
-
-```typescript
-import { scanBlockRange } from '@opnet-devs/opstream';
-import { decodeEvent } from '@opnet-devs/opkit';
-
-await scanBlockRange(db, client, fromBlock, toBlock, {
-  // Inject OpKit's decoder so decoded_json is populated at index time
-  decode: (eventType, data) => decodeEvent(eventType, data),
-});
-```
-
-When running OpStream as a **standalone scanner** (the common case), leave `decode`
-unset. `decoded_json` will be `null` in the database. OpKit reads `event_raw` and
-decodes it on the fly inside its handlers — this is the recommended pattern because
-it keeps the decoder logic in the application layer, not the infrastructure layer.
+- **Adding a new decoder is free** — it instantly applies to every historical event in
+  the archive without any rewrite of OpStream's database.
+- **OpStream is stable** — schema changes for new event types live in OpKit, not the
+  archival layer.
+- **Multiple consumers can decode differently** — each OpKit instance owns its own
+  registry and is free to interpret the same raw bytes through different ABIs.
 
 ### Registering Decoders in OpKit
 
 ```typescript
-import { registerDecoder } from '@opnet-devs/opkit';
+import { registerDecoder } from '@opnet-collective/opkit';
 
 // Register a decoder for a specific event type
 registerDecoder('Swapped', (data: Buffer) => {

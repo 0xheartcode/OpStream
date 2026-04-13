@@ -9,7 +9,7 @@ every deployed contract. Query it directly with SQL.
 ## Opening the Database
 
 ```typescript
-import { openDb } from '@opnet-devs/opstream';
+import { openDb } from '@opnet-collective/opstream';
 
 const db = openDb('data/opstream.db');
 ```
@@ -25,7 +25,7 @@ instance for cases where you need prepared statements.
 For the most common query — filtered events — use the typed helper:
 
 ```typescript
-import { queryEvents } from '@opnet-devs/opstream';
+import { queryEvents } from '@opnet-collective/opstream';
 
 const events = await queryEvents(db, {
   contract:  'bc1qmycontract…',
@@ -102,7 +102,7 @@ const heavy = await db.all(
 
 // Transactions that touched a specific contract
 const interactions = await db.all(
-  `SELECT t.*, e.event_name, e.decoded_json
+  `SELECT t.*, e.event_name, e.event_raw
    FROM transactions t
    JOIN events e ON e.tx_hash = t.tx_hash
    WHERE t.contract_address = ?
@@ -240,8 +240,7 @@ The `receipt` and `receipt_proofs` columns were added with the archival commit. 
 | `contract_address` | TEXT | Contract that emitted the event |
 | `event_name` | TEXT | Event type name |
 | `log_index` | INTEGER | Position within the transaction (0-based) |
-| `event_raw` | BLOB | Raw event bytes |
-| `decoded_json` | TEXT | ABI-decoded fields as JSON (nullable — null if no decoder was provided) |
+| `event_raw` | BLOB | Raw event bytes (decoding is OpKit's job, applied at read time) |
 | `data_length` | INTEGER | Byte count of `event_raw` |
 
 ### `tx_outputs`
@@ -285,7 +284,7 @@ SELECT
   e.contract_address,
   e.event_name,
   e.log_index,
-  e.decoded_json,
+  e.event_raw,
   t.from_address,
   t.gas_used,
   t.burned_bitcoin,

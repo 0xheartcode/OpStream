@@ -12,6 +12,7 @@
 
 import postgres from 'postgres';
 import type { DbAdapter } from './dbAdapter.js';
+import { log } from './logger.js';
 
 // ---------------------------------------------------------------------------
 // Postgres schema — equivalent to the SQLite SCHEMA in db.ts but typed for PG
@@ -88,7 +89,6 @@ CREATE TABLE IF NOT EXISTS events (
   event_name       TEXT NOT NULL,
   log_index        INTEGER NOT NULL DEFAULT 0,
   event_raw        BYTEA NOT NULL,
-  decoded_json     TEXT,
   data_length      INTEGER NOT NULL,
   created_at       BIGINT NOT NULL DEFAULT extract(epoch from now())::bigint,
   UNIQUE(block_number, tx_hash, contract_address, event_name, log_index)
@@ -214,9 +214,39 @@ export class PostgresAdapter implements DbAdapter {
 // Factory
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Connection retry helper
+// ---------------------------------------------------------------------------
+
+async function waitForPostgres(sql: postgres.Sql, maxAttempts = 10, baseDelayMs = 2000): Promise<void> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await sql`SELECT 1`;
+      if (attempt > 1) {
+        log('INFO', 'db', `Postgres ready after ${attempt} attempt(s)`);
+      }
+      return;
+    } catch (err) {
+      const isLast = attempt === maxAttempts;
+      const msg = err instanceof Error ? err.message : String(err);
+      if (isLast) {
+        log('ERROR', 'db', `Postgres unreachable after ${maxAttempts} attempts — giving up`, { error: msg });
+        throw err;
+      }
+      const delay = Math.min(baseDelayMs * attempt, 30_000);
+      log('WARN', 'db', `Postgres not ready (attempt ${attempt}/${maxAttempts}): ${msg} — retrying in ${delay / 1000}s`);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+}
+
 /**
  * Open a Postgres connection, apply schema, return a PostgresAdapter.
  * url format: postgres://user:pass@host:5432/dbname
+ *
+ * Retries the initial connectivity check up to 10 times with linear backoff
+ * (2s, 4s, 6s … capped at 30s) so Railway private-network DNS has time to
+ * propagate before the process gives up.
  */
 export async function openPostgresDb(url: string): Promise<PostgresAdapter> {
   const sql = postgres(url, {
@@ -225,12 +255,46 @@ export async function openPostgresDb(url: string): Promise<PostgresAdapter> {
     connect_timeout: 10,
   });
 
-  // Verify connectivity
-  await sql`SELECT 1`;
+  // Verify connectivity — retries on transient DNS / connection failures
+  await waitForPostgres(sql);
 
   // Apply schema (idempotent — CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT EXISTS)
   const adapter = new PostgresAdapter(sql);
   await adapter.exec(POSTGRES_SCHEMA);
+
+  // Drop the deprecated decoded_json column from existing databases.
+  // Decoding is OpKit's job and runs from event_raw at read time.
+  // mempool_pending may not exist on a fresh Postgres install — best-effort.
+  const applied: string[] = [];
+
+  const eventsHas = await adapter.get<{ exists: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM information_schema.columns
+       WHERE table_name = 'events' AND column_name = 'decoded_json'
+     ) AS exists`,
+  );
+  if (eventsHas?.exists) {
+    await adapter.exec(`ALTER TABLE events DROP COLUMN IF EXISTS decoded_json`);
+    applied.push('events.decoded_json dropped (decoding moved to OpKit)');
+  }
+
+  const mempoolHas = await adapter.get<{ exists: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM information_schema.columns
+       WHERE table_name = 'mempool_pending' AND column_name = 'decoded_json'
+     ) AS exists`,
+  );
+  if (mempoolHas?.exists) {
+    await adapter.exec(`ALTER TABLE mempool_pending DROP COLUMN IF EXISTS decoded_json`);
+    applied.push('mempool_pending.decoded_json dropped (decoding moved to OpKit)');
+  }
+
+  if (applied.length > 0) {
+    log('INFO', 'db', `Schema migrations applied (${applied.length})`);
+    for (const change of applied) {
+      log('INFO', 'db', `  - ${change}`);
+    }
+  }
 
   return adapter;
 }

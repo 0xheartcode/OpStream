@@ -96,7 +96,6 @@ interface WebhookEvent {
   txHash:          string;        // transaction ID
   contractAddress: string;        // contract that emitted the event
   eventName:       string;        // e.g. "Swapped", "Transfer", "Synced"
-  decodedJson:     string | null; // ABI-decoded fields as JSON, or null
 
   // ── Position within the block ─────────────────────────────────────────────
   logIndex:        number;        // event's position within its transaction (0-based)
@@ -118,6 +117,10 @@ interface WebhookEvent {
 `gasUsed` and `burnedBitcoin` are serialised as decimal strings (not numbers) because they
 are `bigint` values on-chain and JSON has no native 64-bit integer type.
 
+OpStream pushes raw event bytes only — `eventRaw` is the source of truth. Decoding into
+structured fields is the consumer's job (e.g. OpKit applies its `DECODER_REGISTRY` at
+read time).
+
 ### Example message
 
 ```json
@@ -126,7 +129,6 @@ are `bigint` values on-chain and JSON has no native 64-bit integer type.
   "txHash": "a3f8c1…",
   "contractAddress": "bc1q…",
   "eventName": "Swapped",
-  "decodedJson": "{\"amountIn\":\"500000\",\"amountOut\":\"48231\"}",
   "logIndex": 0,
   "txIndex": 3,
   "blockTimestamp": 1718400123,
@@ -182,7 +184,7 @@ events into OpKit handlers without requiring shared filesystem access or databas
 To use it, point OpKit at OpStream's WS address:
 
 ```typescript
-import { createEventSource } from '@opnet-devs/opkit';
+import { createEventSource } from '@opnet-collective/opkit';
 
 const source = createEventSource({
   type: 'ws',

@@ -3,7 +3,8 @@
 OpStream can deliver indexed events to external HTTP endpoints and in-process listeners
 via its `SubscriptionManager`. Unlike the WebSocket broadcast (which sends every event
 to every client), webhooks support pattern-based filtering: subscribe to a specific
-contract, a specific event name, or a minimum token amount.
+contract or a specific event name. Payload-aware filters (e.g. minimum token amount)
+belong in the consumer — OpStream stores raw event bytes and never decodes them.
 
 ---
 
@@ -29,7 +30,7 @@ triggers a POST to each URL.
 For fine-grained control, use the `SubscriptionManager` API directly.
 
 ```typescript
-import { getWebhookManager } from '@opnet-devs/opstream';
+import { getWebhookManager } from '@opnet-collective/opstream';
 
 const manager = getWebhookManager();
 
@@ -48,14 +49,8 @@ const id3 = manager.register(
   'https://my-app.com/swaps',
 );
 
-// Filter by minimum token amount (reads from decodedJson.amount or decodedJson.amount0In)
-const id4 = manager.register(
-  { eventName: 'Swapped', minAmount: 1_000_000n },
-  'https://my-app.com/large-swaps',
-);
-
 // Combined filter — AND logic
-const id5 = manager.register(
+const id4 = manager.register(
   { contract: 'bc1qpair…', eventName: 'Synced' },
   'https://my-app.com/pair-syncs',
 );
@@ -72,14 +67,14 @@ manager.unregister(id1);
 in-process delivery — no HTTP round-trip, no network call:
 
 ```typescript
-import { getWebhookManager } from '@opnet-devs/opstream';
-import type { WebhookEvent } from '@opnet-devs/opstream';
+import { getWebhookManager } from '@opnet-collective/opstream';
+import type { WebhookEvent } from '@opnet-collective/opstream';
 
 const manager = getWebhookManager();
 
 manager.on('broadcast', (event: WebhookEvent) => {
   if (event.eventName !== 'Swapped') return;
-  console.log(`Swap on block ${event.blockNumber}: ${event.decodedJson}`);
+  console.log(`Swap on block ${event.blockNumber}: ${event.eventRaw}`);
 });
 ```
 
@@ -129,7 +124,6 @@ Content-Type: application/json
   "txHash": "a3f8c1…",
   "contractAddress": "bc1q…",
   "eventName": "Swapped",
-  "decodedJson": "{\"amountIn\":\"500000\",\"amountOut\":\"48231\"}",
   "logIndex": 0,
   "txIndex": 3,
   "blockTimestamp": 1718400123,
@@ -155,6 +149,5 @@ All pattern fields are optional and combined with AND logic:
 |-------|------|-----------|
 | `contract` | `string` | Case-insensitive exact match on `contractAddress` |
 | `eventName` | `string` | Exact match on `eventName` |
-| `minAmount` | `bigint` | Parses `decodedJson.amount` or `decodedJson.amount0In` and requires it `>= minAmount` |
 
 An empty pattern `{}` matches every event.

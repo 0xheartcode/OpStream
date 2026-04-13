@@ -82,6 +82,21 @@ export interface RpcTransaction {
   events: RpcLogExtended[];
 }
 
+/**
+ * Full tx shape for opstream_getBlockRange — all DB columns exposed.
+ * Extends RpcTransaction with fields the slim handlers omit.
+ * Binary columns (calldata, receipt) are hex-encoded strings.
+ */
+export interface RpcTransactionFull extends RpcTransaction {
+  special_gas_used: string | null;
+  max_gas_sat: string | null;
+  sender_pub_key_hash: string | null;
+  calldata: string | null;          // hex, no 0x prefix
+  calldata_length: number | null;
+  receipt: string | null;           // hex, no 0x prefix
+  receipt_proofs: string[] | null;  // parsed from JSON text
+}
+
 /** Result shape for btc_getBlockReceipts. */
 export interface RpcBlockReceipts {
   block_number: number;
@@ -143,6 +158,17 @@ interface TxDbRow {
   priority_fee: string | null;
   failed: number;   // SQLite INTEGER — 0 or 1
   revert_reason: string | null;
+}
+
+/** Full row — all stored tx columns. Used by opstream_getBlockRange. */
+interface FullTxDbRow extends TxDbRow {
+  special_gas_used: string | null;
+  max_gas_sat: string | null;
+  sender_pub_key_hash: string | null;
+  calldata: Buffer | null;
+  calldata_length: number | null;
+  receipt: Buffer | null;
+  receipt_proofs: string | null;  // JSON text stored in DB
 }
 
 interface BlockDbRow {
@@ -279,6 +305,20 @@ function rowToTx(tx: TxDbRow, events: RpcLogExtended[]): RpcTransaction {
     failed:           tx.failed !== 0,
     revert_reason:    tx.revert_reason,
     events,
+  };
+}
+
+/** Map a full DB tx row to the wire RpcTransactionFull shape (all DB columns). */
+function rowToTxFull(tx: FullTxDbRow, events: RpcLogExtended[]): RpcTransactionFull {
+  return {
+    ...rowToTx(tx, events),
+    special_gas_used:    tx.special_gas_used,
+    max_gas_sat:         tx.max_gas_sat,
+    sender_pub_key_hash: tx.sender_pub_key_hash,
+    calldata:            tx.calldata ? tx.calldata.toString('hex') : null,
+    calldata_length:     tx.calldata_length,
+    receipt:             tx.receipt ? tx.receipt.toString('hex') : null,
+    receipt_proofs:      tx.receipt_proofs ? JSON.parse(tx.receipt_proofs) as string[] : null,
   };
 }
 
@@ -652,9 +692,12 @@ async function handleGetBlockRange(
     const results: Record<string, unknown>[] = [];
 
     for (const blockRow of blockRows) {
-      const txRows = await db.all<TxDbRow>(
+      // All stored tx columns — matches the full DB row, same as the source of truth
+      const txRows = await db.all<FullTxDbRow>(
         `SELECT tx_hash, block_number, tx_index, tx_type, from_address, contract_address,
-                gas_used, burned_bitcoin, priority_fee, failed, revert_reason
+                gas_used, special_gas_used, burned_bitcoin, priority_fee, max_gas_sat,
+                failed, revert_reason, calldata, calldata_length, sender_pub_key_hash,
+                receipt, receipt_proofs
          FROM transactions WHERE block_number = ? ORDER BY tx_index`,
         [blockRow.block_number],
       );
@@ -667,7 +710,8 @@ async function handleGetBlockRange(
         continue;
       }
 
-      // Full tx objects, optionally with events
+      // Events grouped by tx — always fetched when includeTx=true so each tx
+      // has its events inline (same as opstream_getBlockByNumber behaviour)
       const eventsByTx = new Map<string, Array<EventRow & { log_index: number }>>();
 
       if (includeEvents) {
@@ -685,7 +729,7 @@ async function handleGetBlockRange(
       results.push({
         ...header,
         transactions: txRows.map((tx) =>
-          rowToTx(tx, includeEvents ? (eventsByTx.get(tx.tx_hash) ?? []).map(rowToLog) : []),
+          rowToTxFull(tx, includeEvents ? (eventsByTx.get(tx.tx_hash) ?? []).map(rowToLog) : []),
         ),
       });
     }

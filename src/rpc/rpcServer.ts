@@ -50,6 +50,7 @@ import type { DbAdapter } from '../core/dbAdapter.js';
 import { queryEvents } from '../indexer/eventStore.js';
 import type { EventRow } from '../indexer/eventStore.js';
 import { log } from '../core/logger.js';
+import { createSyncHandler } from './syncHandler.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -599,6 +600,102 @@ async function handleGetCodeHash(
   }
 }
 
+/**
+ * opstream_getBlockRange — return rich block objects for a range of blocks.
+ *
+ * params: [fromBlock, toBlock, {includeTx?: boolean, includeEvents?: boolean}]
+ *   fromBlock / toBlock: block number, hex string, or "latest"
+ *   includeTx:     when true, transactions are full objects (default: false → tx hashes)
+ *   includeEvents: when true, events are embedded in each tx (default: false)
+ *
+ * Max range: 50 blocks. Returns an array of RpcBlock objects, one per indexed
+ * block in the range (skips any gaps). Useful for downstream consumers that
+ * need to poll a specific window; for full bootstrap use /sync/export instead.
+ */
+const MAX_BLOCK_RANGE = 100;
+
+async function handleGetBlockRange(
+  id: string | number | null | undefined,
+  params: unknown,
+  db: DbAdapter,
+): Promise<JsonRpcResponse> {
+  if (!Array.isArray(params) || params.length < 2) return fail(id, INVALID_PARAMS);
+
+  let latest: number | undefined;
+  if (params[0] === 'latest' || params[1] === 'latest') {
+    latest = await getLatestIndexedBlock(db);
+  }
+
+  const fromBlock = resolveBlock(params[0], latest);
+  const toBlock   = resolveBlock(params[1], latest);
+  if (fromBlock === undefined || toBlock === undefined) return fail(id, INVALID_PARAMS);
+
+  const opts = (typeof params[2] === 'object' && params[2] !== null)
+    ? params[2] as Record<string, unknown>
+    : {};
+  const includeTx     = opts['includeTx']     === true;
+  const includeEvents = opts['includeEvents'] === true;
+
+  if (toBlock < fromBlock) return fail(id, { ...INVALID_PARAMS, message: 'toBlock must be >= fromBlock' });
+
+  // Clamp to max range
+  const clampedTo = Math.min(toBlock, fromBlock + MAX_BLOCK_RANGE - 1);
+
+  try {
+    const blockRows = await db.all<ArchivalBlockRow>(
+      `SELECT ${ARCHIVAL_BLOCK_COLS}
+       FROM blocks WHERE block_number >= ? AND block_number <= ?
+       ORDER BY block_number`,
+      [fromBlock, clampedTo],
+    );
+
+    const results: Record<string, unknown>[] = [];
+
+    for (const blockRow of blockRows) {
+      const txRows = await db.all<TxDbRow>(
+        `SELECT tx_hash, block_number, tx_index, tx_type, from_address, contract_address,
+                gas_used, burned_bitcoin, priority_fee, failed, revert_reason
+         FROM transactions WHERE block_number = ? ORDER BY tx_index`,
+        [blockRow.block_number],
+      );
+
+      // Full archival block header (same 22-field shape as btc_getBlockByNumber)
+      const header = blockRowToUpstream(blockRow);
+
+      if (!includeTx) {
+        results.push({ ...header, transactions: txRows.map((t) => t.tx_hash) });
+        continue;
+      }
+
+      // Full tx objects, optionally with events
+      const eventsByTx = new Map<string, Array<EventRow & { log_index: number }>>();
+
+      if (includeEvents) {
+        const eventRows = await db.all<EventRow & { log_index: number }>(
+          'SELECT * FROM events WHERE block_number = ? ORDER BY tx_hash, log_index',
+          [blockRow.block_number],
+        );
+        for (const row of eventRows) {
+          const bucket = eventsByTx.get(row.tx_hash) ?? [];
+          bucket.push(row);
+          eventsByTx.set(row.tx_hash, bucket);
+        }
+      }
+
+      results.push({
+        ...header,
+        transactions: txRows.map((tx) =>
+          rowToTx(tx, includeEvents ? (eventsByTx.get(tx.tx_hash) ?? []).map(rowToLog) : []),
+        ),
+      });
+    }
+
+    return ok(id, results);
+  } catch (e) {
+    return fail(id, { ...INTERNAL_ERROR, message: `Internal error: ${String(e)}` });
+  }
+}
+
 // ---------------------------------------------------------------------------
 // btc_* archival handlers — served locally with the exact upstream shape
 // ---------------------------------------------------------------------------
@@ -839,6 +936,7 @@ async function handleSingle(
     case 'opstream_getBlockReceipts':      return handleGetBlockReceipts(id, params, db);
     case 'opstream_getBlockByNumber':      return handleGetBlockByNumber(id, params, db);
     case 'opstream_getBlockByHash':        return handleGetBlockByHash(id, params, db);
+    case 'opstream_getBlockRange':         return handleGetBlockRange(id, params, db);
     case 'opstream_getTransaction':        return handleGetTransaction(id, params, db);
     case 'opstream_getTransactionReceipt': return handleGetTransactionReceipt(id, params, db);
     case 'opstream_getCodeHash':           return handleGetCodeHash(id, params, db);
@@ -869,10 +967,19 @@ async function handleSingle(
 export function createRpcHandler(
   db: DbAdapter,
   upstreamUrlRaw: string,
+  syncSecret: string | null = null,
 ): (req: IncomingMessage, res: ServerResponse) => void {
   const upstreamUrl = normalizeUpstreamUrl(upstreamUrlRaw);
+  const syncHandler = createSyncHandler(db, syncSecret);
+
   return (req: IncomingMessage, res: ServerResponse): void => {
     void (async () => {
+      // Route /sync/* to the sync handler (GET)
+      if (req.url?.startsWith('/sync/')) {
+        syncHandler(req, res);
+        return;
+      }
+
       if (req.method !== 'POST') {
         res.writeHead(405, { Allow: 'POST' });
         res.end();
@@ -927,9 +1034,14 @@ export function createRpcHandler(
 let _server: Server | null = null;
 
 /** Start the JSON-RPC server on the given port. Idempotent — no-op if already running. */
-export function startRpcServer(port: number, db: DbAdapter, upstreamUrl: string): void {
+export function startRpcServer(
+  port: number,
+  db: DbAdapter,
+  upstreamUrl: string,
+  syncSecret: string | null = null,
+): void {
   if (_server) return;
-  _server = createServer(createRpcHandler(db, upstreamUrl));
+  _server = createServer(createRpcHandler(db, upstreamUrl, syncSecret));
   _server.listen(port);
 }
 

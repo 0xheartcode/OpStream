@@ -47,6 +47,13 @@ export interface OpStreamConfig {
 
   // Mempool poller interval (ms) — only used in 'mempool' or 'full' mode
   mempoolPollIntervalMs: number;
+
+  // Fast sync — server side: shared secret that callers must present as
+  // "Authorization: Bearer <secret>". Null = no auth (open, not recommended
+  // in production). Client side: SYNC_SOURCE_URL is the remote OpStream
+  // instance to sync from; SYNC_SECRET must match the remote's secret.
+  syncSecret: string | null;
+  syncSourceUrl: string | null;
 }
 
 function parseBigInt(val: string | undefined, def: bigint): bigint {
@@ -87,6 +94,8 @@ export function loadConfig(): OpStreamConfig {
     wsPort:  parseInt10(process.env['WS_PORT'],  0),
     rpcPort: parseInt10(process.env['RPC_PORT'], 0),
     mempoolPollIntervalMs: parseInt10(process.env['MEMPOOL_POLL_INTERVAL_MS'], 10_000),
+    syncSecret:    process.env['SYNC_SECRET']     ?? null,
+    syncSourceUrl: process.env['SYNC_SOURCE_URL'] ?? null,
   };
 }
 

@@ -7,9 +7,8 @@
  *
  * What it clears:
  *   - blocks, transactions, tx_outputs, events  (raw scan data)
- *   - contract_deployments                          (deployment index)
- *   - scan_checkpoints                           (so bootstrap restarts at FROM_BLOCK)
- *   - mempool_pending                            (pending-tx cache)
+ *   - contract_deployments                      (deployment index)
+ *   - scan_checkpoints                          (so bootstrap restarts at FROM_BLOCK)
  *
  * What it preserves:
  *   - tokens          (owned by op-index — metadata users provide)
@@ -27,7 +26,6 @@ export const RESET_TABLES: readonly string[] = [
   'blocks',
   'contract_deployments',
   'scan_checkpoints',
-  'mempool_pending',
 ] as const;
 
 export interface ResetResult {

@@ -24,6 +24,10 @@ Commands:
   start           Bootstrap + live — catch up then follow chain tip
   bootstrap       Full scan from BOOTSTRAP_FROM_BLOCK (exits when done)
   live            Follow chain tip only (assumes already caught up)
+  sync            Fast-sync local DB from a remote OpStream instance
+                  (seconds instead of hours)
+  sync-live       Fast-sync then immediately follow chain tip (recommended
+                  cold-start: one command instead of sync && live)
   reset [--yes]   Truncate all scanned tables — destructive. Prompts for
                   confirmation unless --yes is passed or FORCE=1 is set.
 
@@ -52,6 +56,9 @@ Environment:
   BITCOIN_RPC_URL            Bitcoin Core RPC URL (required for mempool/full mode)
   BITCOIN_RPC_USER           Bitcoin Core RPC username
   BITCOIN_RPC_PASS           Bitcoin Core RPC password
+  SYNC_SOURCE_URL            Remote OpStream base URL to sync from (for \`sync\` command)
+  SYNC_SECRET                Shared secret for /sync/* auth. Unset = open (no auth).
+                             Server enforces it; client must present the same value.
 `.trim();
 
 async function openAdapter() {
@@ -86,6 +93,147 @@ async function main(): Promise<void> {
     case 'bootstrap': {
       const { runBootstrap } = await import('./indexer/bootstrap.js');
       await runBootstrap();
+      break;
+    }
+
+    case 'sync': {
+      const { loadConfig } = await import('./core/config.js');
+      const { log } = await import('./core/logger.js');
+
+      const config = loadConfig();
+
+      // CLI flags override env vars
+      const flags = process.argv.slice(3);
+      let sourceUrl: string | undefined;
+      let secret: string | null | undefined;
+
+      for (let i = 0; i < flags.length; i++) {
+        if (flags[i] === '--source' && flags[i + 1]) { sourceUrl = flags[++i]; }
+        if (flags[i] === '--secret' && flags[i + 1]) { secret = flags[++i]; }
+        if (flags[i] === '--no-secret') { secret = null; }
+      }
+
+      // Resolve source URL — CLI flag > SYNC_SOURCE_URL > error
+      const resolvedSource = sourceUrl ?? config.syncSourceUrl ?? undefined;
+      if (!resolvedSource) {
+        process.stderr.write(
+          'sync: no source URL.\n' +
+          '  Pass --source URL  or set SYNC_SOURCE_URL in your .env\n',
+        );
+        process.exit(1);
+      }
+
+      // Resolve secret — CLI flag > SYNC_SECRET env > null (open)
+      const resolvedSecret = secret !== undefined ? secret : config.syncSecret;
+
+      log('INFO', 'sync', 'Opening local database...');
+      const db = await openAdapter();
+
+      try {
+        const { runSyncImport } = await import('./indexer/syncImport.js');
+        const result = await runSyncImport(db, {
+          sourceUrl: resolvedSource,
+          secret:    resolvedSecret,
+        });
+
+        if (result.alreadySynced) {
+          log('INFO', 'sync', 'Already up to date — run `start` or `live` to follow the chain tip');
+        } else {
+          log('INFO', 'sync', `Sync done — ${result.blocksImported} blocks imported`);
+          log('INFO', 'sync', 'Run `start` or `live` to continue following the chain tip');
+        }
+      } finally {
+        await db.close();
+      }
+      break;
+    }
+
+    case 'sync-live': {
+      // Fast-sync then go live in one shot. Equivalent to `sync && live`.
+      const { loadConfig, validateConfig } = await import('./core/config.js');
+      const { getWebhookManager } = await import('./indexer/webhooks.js');
+      const { log } = await import('./core/logger.js');
+
+      const config = loadConfig();
+
+      // CLI flags (same as `sync`)
+      const flags = process.argv.slice(3);
+      let sourceUrl: string | undefined;
+      let secret: string | null | undefined;
+
+      for (let i = 0; i < flags.length; i++) {
+        if (flags[i] === '--source' && flags[i + 1]) { sourceUrl = flags[++i]; }
+        if (flags[i] === '--secret' && flags[i + 1]) { secret = flags[++i]; }
+        if (flags[i] === '--no-secret') { secret = null; }
+      }
+
+      const resolvedSource = sourceUrl ?? config.syncSourceUrl ?? undefined;
+      if (!resolvedSource) {
+        process.stderr.write(
+          'sync-live: no source URL.\n' +
+          '  Pass --source URL  or set SYNC_SOURCE_URL in your .env\n',
+        );
+        process.exit(1);
+      }
+      const resolvedSecret = secret !== undefined ? secret : config.syncSecret;
+
+      // Phase 1: sync
+      log('INFO', 'main', 'Phase 1/2 — fast sync');
+      const db = await openAdapter();
+      const webhooks = getWebhookManager();
+
+      const { runSyncImport } = await import('./indexer/syncImport.js');
+      await runSyncImport(db, { sourceUrl: resolvedSource, secret: resolvedSecret });
+
+      // Phase 2: live
+      log('INFO', 'main', 'Phase 2/2 — going live');
+      validateConfig(config);
+
+      const runIndexer = config.mode === 'indexer' || config.mode === 'full';
+      const runMempool = config.mode === 'mempool' || config.mode === 'full';
+
+      if (config.wsPort > 0) {
+        webhooks.startBroadcastServer(config.wsPort);
+        log('INFO', 'main', `WebSocket broadcast server on ws://localhost:${config.wsPort}`);
+      }
+
+      if (config.rpcPort > 0) {
+        const { startRpcServer } = await import('./rpc/rpcServer.js');
+        startRpcServer(config.rpcPort, db, config.opnetRpcUrl, config.syncSecret);
+        log('INFO', 'main', `JSON-RPC 2.0 server on http://localhost:${config.rpcPort}`);
+      }
+
+      const stopPromises: Promise<void>[] = [];
+
+      if (runIndexer) {
+        const { OpnetRpcClient } = await import('./rpc/opnetRpc.js');
+        const { startLiveIndexer } = await import('./indexer/liveIndexer.js');
+        const client = new OpnetRpcClient(config.opnetRpcUrl);
+        log('INFO', 'main', 'Starting live indexer...');
+        const indexerHandle = startLiveIndexer(db, client, {
+          onEvent: (event) => webhooks.dispatch(event),
+          storeGenericTxs: config.storeGenericTxs,
+        });
+        stopPromises.push(
+          (indexerHandle as ReturnType<typeof startLiveIndexer> & { _stopPromise: Promise<void> })._stopPromise,
+        );
+      }
+
+      if (runMempool) {
+        const { BitcoinRpcClient } = await import('./rpc/btcRpc.js');
+        const { startMempoolPoller } = await import('./indexer/mempoolPoller.js');
+        const btcRpc = new BitcoinRpcClient(config.bitcoinRpcUrl, config.bitcoinRpcUser, config.bitcoinRpcPass);
+        await btcRpc.connect();
+        const mempoolHandle = startMempoolPoller(db, btcRpc, {
+          pollIntervalMs: config.mempoolPollIntervalMs,
+          onMempoolEvent: (event) => webhooks.dispatch(event),
+        });
+        stopPromises.push(
+          (mempoolHandle as ReturnType<typeof startMempoolPoller> & { _stopPromise: Promise<void> })._stopPromise,
+        );
+      }
+
+      await Promise.all(stopPromises);
       break;
     }
 
@@ -167,8 +315,13 @@ async function main(): Promise<void> {
 
       if (config.rpcPort > 0) {
         const { startRpcServer } = await import('./rpc/rpcServer.js');
-        startRpcServer(config.rpcPort, db, config.opnetRpcUrl);
+        startRpcServer(config.rpcPort, db, config.opnetRpcUrl, config.syncSecret);
         log('INFO', 'main', `JSON-RPC 2.0 server on http://localhost:${config.rpcPort}`);
+        if (config.syncSecret) {
+          log('INFO', 'main', 'Sync endpoints: /sync/status, /sync/export (auth required)');
+        } else {
+          log('INFO', 'main', 'Sync endpoints: /sync/status, /sync/export (open — set SYNC_SECRET to restrict)');
+        }
       }
 
       const stopPromises: Promise<void>[] = [];
@@ -237,7 +390,7 @@ async function main(): Promise<void> {
 
       if (config.rpcPort > 0) {
         const { startRpcServer } = await import('./rpc/rpcServer.js');
-        startRpcServer(config.rpcPort, db, config.opnetRpcUrl);
+        startRpcServer(config.rpcPort, db, config.opnetRpcUrl, config.syncSecret);
         log('INFO', 'main', `JSON-RPC 2.0 server on http://localhost:${config.rpcPort}`);
       }
 

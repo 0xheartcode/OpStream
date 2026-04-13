@@ -44,12 +44,16 @@ OpStream is the [Subsquid Archive](https://github.com/subsquid/squid-sdk) of OPN
 ```bash
 npm install
 
-# Catch up from genesis, then follow chain tip (recommended)
-npx tsx src/main.ts start
+# Fast sync from the public Railway instance (seconds, not hours):
+SYNC_SOURCE_URL=https://opstream-mainnet-production.up.railway.app \
+  npx tsx src/main.ts sync
 
-# Or run separately
+# Then follow chain tip live:
+npx tsx src/main.ts live
+
+# Or: full bootstrap from OPNET RPC (slow — use sync instead)
 npx tsx src/main.ts bootstrap   # scan to chain tip and exit
-npx tsx src/main.ts live        # follow tip only (assumes caught up)
+npx tsx src/main.ts start       # bootstrap + live in one shot
 ```
 
 ## Status — What Works
@@ -175,7 +179,9 @@ Pool discovery logic (`processNativeSwapPools`, `processMotoswapPools`, etc.) wa
 | `start` | Bootstrap + live — catch up to chain tip, then follow it continuously |
 | `bootstrap` | Full scan from `BOOTSTRAP_FROM_BLOCK` to chain tip (or `BOOTSTRAP_TO_BLOCK` when set). Checkpoint-resumable. Exits when done. |
 | `live` | Follow chain tip only (assumes already caught up). Includes reorg detection. |
-| `reset [--yes]` | Truncate all scanned data (blocks, transactions, events, deployments, checkpoints, mempool). Destructive — interactive confirmation unless `--yes` or `FORCE=1`. |
+| `sync` | Fast-sync local DB from a remote OpStream instance via `/sync/export`. Orders of magnitude faster than bootstrap — use this for a cold start. See [Fast Sync](#fast-sync) below. |
+| `sync-live` | Fast-sync then immediately start following the chain tip. The recommended cold-start command — one step instead of `sync && live`. |
+| `reset [--yes]` | Truncate all scanned data (blocks, transactions, events, deployments, checkpoints). Destructive — interactive confirmation unless `--yes` or `FORCE=1`. |
 
 ## Environment Variables
 
@@ -183,6 +189,7 @@ Pool discovery logic (`processNativeSwapPools`, `processMotoswapPools`, etc.) wa
 |----------|---------|-------------|
 | `OPNET_RPC_URL` | `https://mainnet.opnet.org` | OPNET JSON-RPC endpoint |
 | `DB_PATH` | `data/opstream.db` | SQLite database file |
+| `DB_URL` | (unset) | Postgres connection URL. Overrides `DB_PATH` when set. |
 | `BOOTSTRAP_FROM_BLOCK` | `941400` | Starting block for bootstrap |
 | `BOOTSTRAP_TO_BLOCK` | (unset) | Stop block (inclusive). Unset scans to chain tip; setting it enables bounded repeatable runs, e.g. `BOOTSTRAP_FROM_BLOCK=941400 BOOTSTRAP_TO_BLOCK=941499` scans exactly 100 blocks regardless of tip. |
 | `BOOTSTRAP_RPS` | `10` | Rate limit (requests per second) |
@@ -197,6 +204,8 @@ Pool discovery logic (`processNativeSwapPools`, `processMotoswapPools`, etc.) wa
 | `BITCOIN_RPC_URL` | (none) | Bitcoin Core RPC URL (required for `mempool`/`full` mode) |
 | `BITCOIN_RPC_USER` | (none) | Bitcoin Core RPC username |
 | `BITCOIN_RPC_PASS` | (none) | Bitcoin Core RPC password |
+| `SYNC_SOURCE_URL` | (none) | Remote OpStream base URL to pull from (used by `sync` command). |
+| `SYNC_SECRET` | (none) | Shared secret for `/sync/*` endpoints. Unset = no auth (open). Server enforces it; client must present the same value. |
 
 ## Data Model
 
@@ -425,8 +434,9 @@ Queries upstream doesn't support at all, or richer shapes that embed events and 
 |---|---|
 | `opstream_getLogs` | Events by contract / event name / block range. O(1) indexed SQL. No upstream equivalent. |
 | `opstream_blockNumber` | Latest indexed checkpoint (lags chain tip during catchup). Use `btc_blockNumber` for the live tip. |
-| `opstream_getBlockByNumber` | Block header + every OPNET tx in the block + nested events. Richer than upstream's header-only response. |
+| `opstream_getBlockByNumber` | Block header + every OPNET tx in the block + nested events. |
 | `opstream_getBlockByHash` | Same, by block hash. |
+| `opstream_getBlockRange` | Array of blocks for a range — full 22-field archival header + txs + events per block. Max 100 blocks. Params: `[fromBlock, toBlock, {includeTx?, includeEvents?}]`. |
 | `opstream_getBlockReceipts` | Every tx + its events for a block in one call. |
 | `opstream_getTransaction` | Tx metadata + all events by tx hash. |
 | `opstream_getTransactionReceipt` | Rich local receipt with tx metadata inline. |
@@ -461,6 +471,76 @@ curl -s -X POST http://localhost:3001 -H 'Content-Type: application/json' \
 ```
 
 Works with both SQLite and Postgres via the `DbAdapter` abstraction.
+
+---
+
+## Fast Sync
+
+OpStream exposes HTTP endpoints that let any other OpStream instance (or any client) clone the full indexed database in seconds instead of hours. The protocol is gzip-compressed NDJSON streamed in 100-block chunks.
+
+### Server side (exposing your data)
+
+Any OpStream instance with `RPC_PORT` set automatically exposes:
+
+```
+GET /sync/status          → { fromBlock, tipBlock, totalBlocks, totalTxs, totalEvents }
+GET /sync/export?from=X&to=Y  → gzip NDJSON (max 100 blocks per request)
+```
+
+No extra config — the endpoints are live as soon as `RPC_PORT` is set.
+
+Auth is optional: set `SYNC_SECRET` on the server to require `Authorization: Bearer <secret>` on every sync request. Leave it unset for fully open access.
+
+### Client side (syncing from a remote)
+
+```bash
+# Sync from the public Railway mainnet instance (no secret required):
+npx tsx src/main.ts sync
+
+# Or explicitly:
+npx tsx src/main.ts sync --source https://opstream-mainnet-production.up.railway.app
+
+# With a secret (when the remote has SYNC_SECRET set):
+npx tsx src/main.ts sync --source https://my-opstream.example.com --secret mysecret
+```
+
+Configure in `.env` to avoid typing it every time:
+
+```bash
+SYNC_SOURCE_URL=https://opstream-mainnet-production.up.railway.app
+# SYNC_SECRET=              # leave unset if the remote is open
+```
+
+The sync command is **resumable** — if interrupted it picks up from the last committed checkpoint. After sync finishes, run `live` to follow the chain tip:
+
+```bash
+npx tsx src/main.ts sync && npx tsx src/main.ts live
+```
+
+### NDJSON line format
+
+Each line in the export stream is `{"t":"<type>","d":{...columns...}}` where:
+- `"b"` → block row (all columns from `blocks` table)
+- `"tx"` → transaction row (`calldata` and `receipt` as base64)
+- `"e"` → event row (`event_raw` as base64)
+- `"dep"` → contract deployment row
+- `"out"` → tx_output row
+
+Binary columns are base64-encoded for JSON safety and decoded back to `BYTEA`/`BLOB` on insert.
+
+### JSON-RPC: `opstream_getBlockRange`
+
+For smaller targeted queries (not bulk bootstrap), there is also a JSON-RPC method:
+
+```bash
+# All blocks 941400–941450 with full tx objects and events:
+curl -s -X POST http://localhost:3001 -H 'Content-Type: application/json' -d '{
+  "jsonrpc":"2.0","id":1,"method":"opstream_getBlockRange",
+  "params":[941400, 941450, {"includeTx":true,"includeEvents":true}]
+}' | jq '.result | length'
+```
+
+Max range: 100 blocks. Returns an array of block objects with the full 22-field archival header (same as `btc_getBlockByNumber`) plus transactions and events. Use `/sync/export` for bulk bootstrap; use `opstream_getBlockRange` for targeted polling windows.
 
 ---
 

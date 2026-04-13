@@ -56,7 +56,7 @@ import { createSyncHandler } from './syncHandler.js';
 // Public types
 // ---------------------------------------------------------------------------
 
-/** Extended RPC log shape — adds logIndex to the base RpcLog. */
+/** Extended RPC log shape — used by opstream_getLogs (Ethereum-compatible filter API). */
 export interface RpcLogExtended {
   address: string;
   topics: string[];         // [eventName]
@@ -66,35 +66,43 @@ export interface RpcLogExtended {
   logIndex: number;
 }
 
-/** Result shape for btc_getTransaction. */
+/**
+ * Inline event shape embedded in transaction objects.
+ * Matches the OPNET RPC wire format exactly:
+ *   { contractAddress, type, data: base64 }
+ */
+export interface RpcEvent {
+  contractAddress: string;
+  type: string;
+  data: string;   // base64-encoded event_raw bytes
+}
+
+/** Result shape for opstream_getTransaction and opstream_getBlock* — matches OPNET wire format. */
 export interface RpcTransaction {
-  tx_hash: string;
-  block_number: number;
-  tx_index: number;
-  tx_type: string;
-  from_address: string | null;
-  contract_address: string | null;
-  gas_used: string | null;
-  burned_bitcoin: string | null;
-  priority_fee: string | null;
-  failed: boolean;
-  revert_reason: string | null;
-  events: RpcLogExtended[];
+  hash: string;
+  blockNumber: string;      // hex "0x…"
+  index: number;
+  OPNetType: string;
+  from: string | null;
+  contractAddress: string | null;
+  gasUsed: string;          // hex "0x…"
+  burnedBitcoin: string;    // hex "0x…"
+  priorityFee: string;      // hex "0x…"
+  revert?: string | null;   // present only when tx failed
+  events: RpcEvent[];
 }
 
 /**
- * Full tx shape for opstream_getBlockRange — all DB columns exposed.
- * Extends RpcTransaction with fields the slim handlers omit.
- * Binary columns (calldata, receipt) are hex-encoded strings.
+ * Full tx shape for opstream_getBlockRange — all DB columns, same OPNET wire
+ * format extended with archival fields the slim handlers omit.
+ * Binary columns (calldata, receipt, senderPubKeyHash) are base64-encoded.
  */
 export interface RpcTransactionFull extends RpcTransaction {
-  special_gas_used: string | null;
-  max_gas_sat: string | null;
-  sender_pub_key_hash: string | null;
-  calldata: string | null;          // hex, no 0x prefix
-  calldata_length: number | null;
-  receipt: string | null;           // hex, no 0x prefix
-  receipt_proofs: string[] | null;  // parsed from JSON text
+  specialGasUsed: string;          // hex "0x…"
+  calldata: string | null;         // base64
+  receipt: string | null;          // base64
+  receiptProofs: string[];
+  senderPubKeyHash: string | null; // base64
 }
 
 /** Result shape for btc_getBlockReceipts. */
@@ -278,7 +286,16 @@ function resolveBlock(val: unknown, latest: number | undefined): number | undefi
   return undefined;
 }
 
-/** Map a DB event row to the wire RpcLogExtended shape. */
+/**
+ * Convert a stored decimal bigint string to the 0x-prefixed hex form used
+ * by upstream OPNET responses. "554155299" → "0x2107bd23".
+ */
+function bigintToHex(v: string | null): string {
+  if (!v) return '0x0';
+  try { return '0x' + BigInt(v).toString(16); } catch { return '0x0'; }
+}
+
+/** Map a DB event row to the Ethereum-compatible RpcLogExtended shape (used by opstream_getLogs). */
 function rowToLog(row: EventRow & { log_index: number }): RpcLogExtended {
   return {
     address:          row.contract_address,
@@ -290,35 +307,43 @@ function rowToLog(row: EventRow & { log_index: number }): RpcLogExtended {
   };
 }
 
-/** Map a DB transaction row + its events to the wire RpcTransaction shape. */
-function rowToTx(tx: TxDbRow, events: RpcLogExtended[]): RpcTransaction {
+/** Map a DB event row to the OPNET native inline event shape. */
+function rowToEvent(row: EventRow): RpcEvent {
   return {
-    tx_hash:          tx.tx_hash,
-    block_number:     tx.block_number,
-    tx_index:         tx.tx_index,
-    tx_type:          tx.tx_type,
-    from_address:     tx.from_address,
-    contract_address: tx.contract_address,
-    gas_used:         tx.gas_used,
-    burned_bitcoin:   tx.burned_bitcoin,
-    priority_fee:     tx.priority_fee,
-    failed:           tx.failed !== 0,
-    revert_reason:    tx.revert_reason,
+    contractAddress: row.contract_address,
+    type:            row.event_name,
+    data:            row.event_raw.toString('base64'),
+  };
+}
+
+/** Map a DB transaction row + its events to the OPNET wire RpcTransaction shape. */
+function rowToTx(tx: TxDbRow, events: RpcEvent[]): RpcTransaction {
+  return {
+    hash:             tx.tx_hash,
+    blockNumber:      '0x' + tx.block_number.toString(16),
+    index:            tx.tx_index,
+    OPNetType:        tx.tx_type,
+    from:             tx.from_address,
+    contractAddress:  tx.contract_address,
+    gasUsed:          bigintToHex(tx.gas_used),
+    burnedBitcoin:    bigintToHex(tx.burned_bitcoin),
+    priorityFee:      bigintToHex(tx.priority_fee),
+    ...(tx.failed !== 0 ? { revert: tx.revert_reason } : {}),
     events,
   };
 }
 
-/** Map a full DB tx row to the wire RpcTransactionFull shape (all DB columns). */
-function rowToTxFull(tx: FullTxDbRow, events: RpcLogExtended[]): RpcTransactionFull {
+/** Map a full DB tx row to the OPNET wire RpcTransactionFull shape (all archival columns). */
+function rowToTxFull(tx: FullTxDbRow, events: RpcEvent[]): RpcTransactionFull {
   return {
     ...rowToTx(tx, events),
-    special_gas_used:    tx.special_gas_used,
-    max_gas_sat:         tx.max_gas_sat,
-    sender_pub_key_hash: tx.sender_pub_key_hash,
-    calldata:            tx.calldata ? tx.calldata.toString('hex') : null,
-    calldata_length:     tx.calldata_length,
-    receipt:             tx.receipt ? tx.receipt.toString('hex') : null,
-    receipt_proofs:      tx.receipt_proofs ? JSON.parse(tx.receipt_proofs) as string[] : null,
+    specialGasUsed:    bigintToHex(tx.special_gas_used),
+    calldata:          tx.calldata    ? tx.calldata.toString('base64')    : null,
+    receipt:           tx.receipt     ? tx.receipt.toString('base64')     : null,
+    receiptProofs:     tx.receipt_proofs ? JSON.parse(tx.receipt_proofs) as string[] : [],
+    senderPubKeyHash:  tx.sender_pub_key_hash
+      ? Buffer.from(tx.sender_pub_key_hash, 'hex').toString('base64')
+      : null,
   };
 }
 
@@ -439,7 +464,7 @@ async function handleGetBlockReceipts(
       timestamp:    blockRow.timestamp,
       tx_count:     blockRow.tx_count,
       transactions: txRows.map((tx) =>
-        rowToTx(tx, (eventsByTx.get(tx.tx_hash) ?? []).map(rowToLog)),
+        rowToTx(tx, (eventsByTx.get(tx.tx_hash) ?? []).map(rowToEvent)),
       ),
     };
 
@@ -471,7 +496,7 @@ async function handleGetTransaction(
       [txHash],
     );
 
-    return ok(id, rowToTx(txRow, eventRows.map(rowToLog)));
+    return ok(id, rowToTx(txRow, eventRows.map(rowToEvent)));
   } catch (e) {
     return fail(id, { ...INTERNAL_ERROR, message: `Internal error: ${String(e)}` });
   }
@@ -527,7 +552,7 @@ async function loadBlock(
     timestamp:    blockRow.timestamp,
     tx_count:     blockRow.tx_count,
     transactions: txRows.map((tx) =>
-      rowToTx(tx, (eventsByTx.get(tx.tx_hash) ?? []).map(rowToLog)),
+      rowToTx(tx, (eventsByTx.get(tx.tx_hash) ?? []).map(rowToEvent)),
     ),
   };
 }
@@ -599,7 +624,7 @@ async function handleGetTransactionReceipt(
       [txHash],
     );
 
-    return ok(id, rowToTx(txRow, eventRows.map(rowToLog)));
+    return ok(id, rowToTx(txRow, eventRows.map(rowToEvent)));
   } catch (e) {
     return fail(id, { ...INTERNAL_ERROR, message: `Internal error: ${String(e)}` });
   }
@@ -648,11 +673,30 @@ async function handleGetCodeHash(
  *   includeTx:     when true, transactions are full objects (default: false → tx hashes)
  *   includeEvents: when true, events are embedded in each tx (default: false)
  *
- * Max range: 50 blocks. Returns an array of RpcBlock objects, one per indexed
- * block in the range (skips any gaps). Useful for downstream consumers that
- * need to poll a specific window; for full bootstrap use /sync/export instead.
+ * Hard limits:
+ *   MAX_BLOCK_RANGE = 1000 blocks per request (block-count cap, always enforced)
+ *   MAX_TXS_PER_RANGE = 10 000 transactions (only when includeTx=true)
+ *   MAX_EVENTS_PER_RANGE = 50 000 events (only when includeTx+includeEvents=true)
+ *
+ * When the tx/event count would exceed the limit the call returns a -32602 error
+ * with a human-readable message and a suggested smaller toBlock — same pattern
+ * as Alchemy's "Log response size exceeded" error. The caller should halve the
+ * range and retry.
+ *
+ * For cold-start bulk import use /sync/export instead (gzip NDJSON, parallel,
+ * includes tx_outputs — significantly faster than repeated getBlockRange calls).
  */
-const MAX_BLOCK_RANGE = 100;
+const MAX_BLOCK_RANGE    = 1000;
+const MAX_TXS_PER_RANGE  = 10_000;
+const MAX_EVTS_PER_RANGE = 50_000;
+
+interface DepDbRow {
+  block_number: number;
+  tx_hash:      string;
+  contract_address: string;
+  deployer:     string | null;
+  bytecode_hash: string | null;
+}
 
 async function handleGetBlockRange(
   id: string | number | null | undefined,
@@ -678,7 +722,7 @@ async function handleGetBlockRange(
 
   if (toBlock < fromBlock) return fail(id, { ...INVALID_PARAMS, message: 'toBlock must be >= fromBlock' });
 
-  // Clamp to max range
+  // Hard clamp: never return more than MAX_BLOCK_RANGE blocks
   const clampedTo = Math.min(toBlock, fromBlock + MAX_BLOCK_RANGE - 1);
 
   try {
@@ -689,48 +733,122 @@ async function handleGetBlockRange(
       [fromBlock, clampedTo],
     );
 
+    if (blockRows.length === 0) return ok(id, []);
+
+    // ── Response-size guard (only when returning full tx bodies) ──────────────
+    // Cheap COUNT queries before pulling any data — same pattern as Alchemy's
+    // "Log response size exceeded" error. Returns a descriptive -32602 with a
+    // suggested smaller toBlock so the caller can halve and retry.
+    if (includeTx) {
+      const txCount = await db.get<{ cnt: number }>(
+        'SELECT COUNT(*) AS cnt FROM transactions WHERE block_number >= ? AND block_number <= ?',
+        [fromBlock, clampedTo],
+      );
+      const txCnt = txCount?.cnt ?? 0;
+      if (txCnt > MAX_TXS_PER_RANGE) {
+        const ratio      = MAX_TXS_PER_RANGE / txCnt;
+        const suggestedTo = fromBlock + Math.floor((clampedTo - fromBlock) * ratio);
+        return fail(id, {
+          ...INVALID_PARAMS,
+          message:
+            `Range [${fromBlock}, ${clampedTo}] contains ${txCnt} transactions ` +
+            `(limit: ${MAX_TXS_PER_RANGE}). ` +
+            `Try a smaller range, e.g. [${fromBlock}, ${suggestedTo}].`,
+        });
+      }
+
+      if (includeEvents) {
+        const evtCount = await db.get<{ cnt: number }>(
+          'SELECT COUNT(*) AS cnt FROM events WHERE block_number >= ? AND block_number <= ?',
+          [fromBlock, clampedTo],
+        );
+        const evtCnt = evtCount?.cnt ?? 0;
+        if (evtCnt > MAX_EVTS_PER_RANGE) {
+          const ratio       = MAX_EVTS_PER_RANGE / evtCnt;
+          const suggestedTo = fromBlock + Math.floor((clampedTo - fromBlock) * ratio);
+          return fail(id, {
+            ...INVALID_PARAMS,
+            message:
+              `Range [${fromBlock}, ${clampedTo}] contains ${evtCnt} events ` +
+              `(limit: ${MAX_EVTS_PER_RANGE}). ` +
+              `Try a smaller range, e.g. [${fromBlock}, ${suggestedTo}].`,
+          });
+        }
+      }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // Fetch all txs, events, deps for the entire range in bulk — O(1) queries not O(N)
+    const txRows = await db.all<FullTxDbRow>(
+      `SELECT tx_hash, block_number, tx_index, tx_type, from_address, contract_address,
+              gas_used, special_gas_used, burned_bitcoin, priority_fee, max_gas_sat,
+              failed, revert_reason, calldata, calldata_length, sender_pub_key_hash,
+              receipt, receipt_proofs
+       FROM transactions WHERE block_number >= ? AND block_number <= ? ORDER BY block_number, tx_index`,
+      [fromBlock, clampedTo],
+    );
+
+    const depRows = await db.all<DepDbRow>(
+      `SELECT block_number, tx_hash, contract_address, deployer, bytecode_hash
+       FROM contract_deployments WHERE block_number >= ? AND block_number <= ?
+       ORDER BY block_number`,
+      [fromBlock, clampedTo],
+    );
+
+    // Group txs by block
+    const txsByBlock = new Map<number, FullTxDbRow[]>();
+    for (const tx of txRows) {
+      const bucket = txsByBlock.get(tx.block_number) ?? [];
+      bucket.push(tx);
+      txsByBlock.set(tx.block_number, bucket);
+    }
+
+    // Group deps by block
+    const depsByBlock = new Map<number, DepDbRow[]>();
+    for (const dep of depRows) {
+      const bucket = depsByBlock.get(dep.block_number) ?? [];
+      bucket.push(dep);
+      depsByBlock.set(dep.block_number, bucket);
+    }
+
+    // Group events by tx (only when needed)
+    const eventsByTx = new Map<string, Array<EventRow & { log_index: number }>>();
+    if (includeTx && includeEvents) {
+      const eventRows = await db.all<EventRow & { log_index: number }>(
+        `SELECT * FROM events WHERE block_number >= ? AND block_number <= ?
+         ORDER BY block_number, tx_hash, log_index`,
+        [fromBlock, clampedTo],
+      );
+      for (const row of eventRows) {
+        const bucket = eventsByTx.get(row.tx_hash) ?? [];
+        bucket.push(row);
+        eventsByTx.set(row.tx_hash, bucket);
+      }
+    }
+
     const results: Record<string, unknown>[] = [];
 
     for (const blockRow of blockRows) {
-      // All stored tx columns — matches the full DB row, same as the source of truth
-      const txRows = await db.all<FullTxDbRow>(
-        `SELECT tx_hash, block_number, tx_index, tx_type, from_address, contract_address,
-                gas_used, special_gas_used, burned_bitcoin, priority_fee, max_gas_sat,
-                failed, revert_reason, calldata, calldata_length, sender_pub_key_hash,
-                receipt, receipt_proofs
-         FROM transactions WHERE block_number = ? ORDER BY tx_index`,
-        [blockRow.block_number],
-      );
-
-      // Full archival block header (same 22-field shape as btc_getBlockByNumber)
       const header = blockRowToUpstream(blockRow);
+      const blockTxs = txsByBlock.get(blockRow.block_number) ?? [];
+      const blockDeps = (depsByBlock.get(blockRow.block_number) ?? []).map((d) => ({
+        txHash:          d.tx_hash,
+        contractAddress: d.contract_address,
+        deployer:        d.deployer,
+        bytecodeHash:    d.bytecode_hash,
+      }));
 
       if (!includeTx) {
-        results.push({ ...header, transactions: txRows.map((t) => t.tx_hash) });
+        results.push({ ...header, transactions: blockTxs.map((t) => t.tx_hash), deployments: blockDeps });
         continue;
-      }
-
-      // Events grouped by tx — always fetched when includeTx=true so each tx
-      // has its events inline (same as opstream_getBlockByNumber behaviour)
-      const eventsByTx = new Map<string, Array<EventRow & { log_index: number }>>();
-
-      if (includeEvents) {
-        const eventRows = await db.all<EventRow & { log_index: number }>(
-          'SELECT * FROM events WHERE block_number = ? ORDER BY tx_hash, log_index',
-          [blockRow.block_number],
-        );
-        for (const row of eventRows) {
-          const bucket = eventsByTx.get(row.tx_hash) ?? [];
-          bucket.push(row);
-          eventsByTx.set(row.tx_hash, bucket);
-        }
       }
 
       results.push({
         ...header,
-        transactions: txRows.map((tx) =>
-          rowToTxFull(tx, includeEvents ? (eventsByTx.get(tx.tx_hash) ?? []).map(rowToLog) : []),
+        transactions: blockTxs.map((tx) =>
+          rowToTxFull(tx, includeEvents ? (eventsByTx.get(tx.tx_hash) ?? []).map(rowToEvent) : []),
         ),
+        deployments: blockDeps,
       });
     }
 
@@ -843,15 +961,6 @@ async function handleBtcGetBlockByHash(
   } catch (e) {
     return fail(id, { ...INTERNAL_ERROR, message: `Internal error: ${String(e)}` });
   }
-}
-
-/**
- * Convert a stored decimal bigint string to the 0x-prefixed hex form used
- * by upstream OPNET responses. "554155299" → "0x2107bd23".
- */
-function bigintToHex(v: string | null): string {
-  if (!v) return '0x0';
-  try { return '0x' + BigInt(v).toString(16); } catch { return '0x0'; }
 }
 
 /** Row shape used by btc_getTransactionReceipt. */

@@ -54,6 +54,13 @@ export interface OpStreamConfig {
   // instance to sync from; SYNC_SECRET must match the remote's secret.
   syncSecret: string | null;
   syncSourceUrl: string | null;
+
+  // Batch bootstrap — opstream_getBlockRange based scanner.
+  // Blocks fetched per request (server cap: 1000). Raise for faster throughput
+  // on a local or low-latency link; lower on high-latency / rate-limited nodes.
+  batchSize: number;
+  // Parallel in-flight opstream_getBlockRange requests (sliding window).
+  batchConcurrency: number;
 }
 
 function parseBigInt(val: string | undefined, def: bigint): bigint {
@@ -96,6 +103,8 @@ export function loadConfig(): OpStreamConfig {
     mempoolPollIntervalMs: parseInt10(process.env['MEMPOOL_POLL_INTERVAL_MS'], 10_000),
     syncSecret:    process.env['SYNC_SECRET']     ?? null,
     syncSourceUrl: process.env['SYNC_SOURCE_URL'] ?? null,
+    batchSize:        parseInt10(process.env['BATCH_SIZE'],        100),
+    batchConcurrency: parseInt10(process.env['BATCH_CONCURRENCY'], 8),
   };
 }
 

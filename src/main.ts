@@ -24,10 +24,13 @@ Commands:
   start           Bootstrap + live — catch up then follow chain tip
   bootstrap       Full scan from BOOTSTRAP_FROM_BLOCK (exits when done)
   live            Follow chain tip only (assumes already caught up)
-  sync            Fast-sync local DB from a remote OpStream instance
-                  (seconds instead of hours)
+  sync            Fast-sync local DB from a remote OpStream instance via
+                  /sync/export (gzip NDJSON — fastest cold-start)
   sync-live       Fast-sync then immediately follow chain tip (recommended
                   cold-start: one command instead of sync && live)
+  batch           Bootstrap using opstream_getBlockRange (batched JSON-RPC).
+                  Slower than sync but useful for speed benchmarking or when
+                  the remote doesn't expose /sync/export.
   reset [--yes]   Truncate all scanned tables — destructive. Prompts for
                   confirmation unless --yes is passed or FORCE=1 is set.
 
@@ -61,6 +64,9 @@ Environment:
                              Server enforces it; client must present the same value.
   SYNC_CONCURRENCY           Parallel chunk fetches during sync (default: 8).
                              Higher = faster on good connections, lower = less load.
+  BATCH_SIZE                 Blocks per opstream_getBlockRange request for \`batch\`
+                             command (default: 100, server cap: 1000).
+  BATCH_CONCURRENCY          Parallel requests for \`batch\` command (default: 8).
 `.trim();
 
 async function openAdapter() {
@@ -95,6 +101,52 @@ async function main(): Promise<void> {
     case 'bootstrap': {
       const { runBootstrap } = await import('./indexer/bootstrap.js');
       await runBootstrap();
+      break;
+    }
+
+    case 'batch': {
+      // Bootstrap using opstream_getBlockRange (batched JSON-RPC) instead of /sync/export.
+      // Useful for speed testing or when the remote doesn't expose /sync/export.
+      const { loadConfig } = await import('./core/config.js');
+      const { log } = await import('./core/logger.js');
+
+      const config = loadConfig();
+
+      const flags = process.argv.slice(3);
+      let sourceUrl: string | undefined;
+      let secret: string | null | undefined;
+      let batchSize: number | undefined;
+      let concurrency: number | undefined;
+
+      for (let i = 0; i < flags.length; i++) {
+        if (flags[i] === '--source'      && flags[i + 1]) { sourceUrl   = flags[++i]; }
+        if (flags[i] === '--secret'      && flags[i + 1]) { secret      = flags[++i]; }
+        if (flags[i] === '--no-secret')                   { secret      = null; }
+        if (flags[i] === '--batch-size'  && flags[i + 1]) { batchSize   = parseInt(flags[++i], 10) || undefined; }
+        if (flags[i] === '--concurrency' && flags[i + 1]) { concurrency = parseInt(flags[++i], 10) || undefined; }
+      }
+
+      const resolvedSource = sourceUrl ?? config.syncSourceUrl ?? config.opnetRpcUrl;
+      const resolvedSecret = secret !== undefined ? secret : config.syncSecret;
+
+      log('INFO', 'batch', 'Opening local database...');
+      const db = await openAdapter();
+
+      try {
+        const { runBatchScan } = await import('./indexer/batchScanner.js');
+        const result = await runBatchScan(db, {
+          sourceUrl:   resolvedSource,
+          secret:      resolvedSecret,
+          batchSize:   batchSize   ?? config.batchSize,
+          concurrency: concurrency ?? config.batchConcurrency,
+        });
+        log('INFO', 'batch', `Batch scan done — ${result.blocksScanned} blocks scanned`);
+        if (result.blocksScanned > 0) {
+          log('INFO', 'batch', 'Run `start` or `live` to continue following the chain tip');
+        }
+      } finally {
+        await db.close();
+      }
       break;
     }
 

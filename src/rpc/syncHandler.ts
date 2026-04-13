@@ -76,8 +76,9 @@ async function handleStatus(db: DbAdapter, res: ServerResponse): Promise<void> {
     const totalTxs    = await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM transactions');
     const totalEvents = await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM events');
 
-    const fromBlock = firstBlock?.block_number ?? null;
-    const tipBlock  = checkpoint?.last_block   ?? null;
+    // Coerce BIGINT columns (Postgres returns them as strings) to JS numbers.
+    const fromBlock = firstBlock?.block_number !== undefined ? Number(firstBlock.block_number) : null;
+    const tipBlock  = checkpoint?.last_block   !== undefined ? Number(checkpoint.last_block)   : null;
     const totalBlocks =
       fromBlock !== null && tipBlock !== null ? tipBlock - fromBlock + 1 : 0;
 

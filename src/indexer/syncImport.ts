@@ -181,10 +181,10 @@ async function insertOutput(db: DbAdapter, d: Record<string, unknown>): Promise<
 // ---------------------------------------------------------------------------
 
 async function getLocalCheckpoint(db: DbAdapter): Promise<number | null> {
-  const row = await db.get<{ last_block: number }>(
+  const row = await db.get<{ last_block: number | string }>(
     "SELECT last_block FROM scan_checkpoints WHERE scan_type = 'indexer'",
   );
-  return row?.last_block ?? null;
+  return row?.last_block !== undefined ? Number(row.last_block) : null;
 }
 
 async function setCheckpoint(db: DbAdapter, block: number): Promise<void> {
@@ -246,21 +246,26 @@ export async function runSyncImport(
     return { blocksImported: 0, alreadySynced: true };
   }
 
-  const localCheckpoint = await getLocalCheckpoint(db);
+  // Coerce to numbers — Postgres BIGINT columns arrive as strings via JSON.
+  const remoteFrom = Number(status.fromBlock);
+  const remoteTip  = Number(status.tipBlock);
+
+  const localCheckpointRaw = await getLocalCheckpoint(db);
+  const localCheckpoint = localCheckpointRaw !== null ? Number(localCheckpointRaw) : null;
 
   // Determine where to start. If local is ahead, we're done.
-  const startBlock = localCheckpoint !== null ? localCheckpoint + 1 : status.fromBlock;
+  const startBlock = localCheckpoint !== null ? localCheckpoint + 1 : remoteFrom;
 
-  if (startBlock > status.tipBlock) {
-    log('INFO', 'sync', `Already synced up to block ${localCheckpoint ?? 'none'}, remote tip is ${status.tipBlock} — up to date`);
+  if (startBlock > remoteTip) {
+    log('INFO', 'sync', `Already synced up to block ${localCheckpoint ?? 'none'}, remote tip is ${remoteTip} — up to date`);
     return { blocksImported: 0, alreadySynced: true };
   }
 
-  const totalToSync = status.tipBlock - startBlock + 1;
+  const totalToSync = remoteTip - startBlock + 1;
   log('INFO', 'sync', '');
   log('INFO', 'sync', `  OpStream Fast Sync`);
   log('INFO', 'sync', `  Source:         ${sourceUrl}`);
-  log('INFO', 'sync', `  Remote tip:     ${status.tipBlock}  (${status.totalBlocks} blocks, ${status.totalTxs} txs, ${status.totalEvents} events)`);
+  log('INFO', 'sync', `  Remote tip:     ${remoteTip}  (${status.totalBlocks} blocks, ${status.totalTxs} txs, ${status.totalEvents} events)`);
   log('INFO', 'sync', `  Local start:    ${startBlock}${localCheckpoint !== null ? ` (resuming from ${localCheckpoint})` : ''}`);
   log('INFO', 'sync', `  Blocks to sync: ${totalToSync}`);
   log('INFO', 'sync', '');
@@ -269,8 +274,8 @@ export async function runSyncImport(
   let blocksImported = 0;
   const isTTY = process.stdout.isTTY;
 
-  for (let from = startBlock; from <= status.tipBlock; from += MAX_BLOCKS_PER_CHUNK) {
-    const to = Math.min(from + MAX_BLOCKS_PER_CHUNK - 1, status.tipBlock);
+  for (let from = startBlock; from <= remoteTip; from += MAX_BLOCKS_PER_CHUNK) {
+    const to = Math.min(from + MAX_BLOCKS_PER_CHUNK - 1, remoteTip);
 
     const lines = await fetchChunk(sourceUrl, secret, from, to);
 
@@ -296,9 +301,9 @@ export async function runSyncImport(
     const bar        = progressBar(blocksImported, totalToSync);
 
     if (isTTY) {
-      process.stdout.write(`\r\x1B[2K${bar} ${pct.padStart(5)}%  block ${to}/${status.tipBlock}  ${bps} blk/s`);
+      process.stdout.write(`\r\x1B[2K${bar} ${pct.padStart(5)}%  block ${to}/${remoteTip}  ${bps} blk/s`);
     } else {
-      log('INFO', 'sync', `Progress: ${pct}%  block ${to}/${status.tipBlock}  ${bps} blk/s`);
+      log('INFO', 'sync', `Progress: ${pct}%  block ${to}/${remoteTip}  ${bps} blk/s`);
     }
   }
 

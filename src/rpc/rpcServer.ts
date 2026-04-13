@@ -49,6 +49,7 @@ import type { IncomingMessage, ServerResponse, Server } from 'node:http';
 import type { DbAdapter } from '../core/dbAdapter.js';
 import { queryEvents } from '../indexer/eventStore.js';
 import type { EventRow } from '../indexer/eventStore.js';
+import { log } from '../core/logger.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -894,6 +895,9 @@ export function createRpcHandler(
         return;
       }
 
+      const ip = (req.headers['x-forwarded-for'] as string | undefined)
+        ?.split(',')[0]?.trim() ?? req.socket.remoteAddress ?? 'unknown';
+
       let response: unknown;
 
       if (Array.isArray(parsed)) {
@@ -902,8 +906,11 @@ export function createRpcHandler(
           res.end(JSON.stringify(fail(null, INVALID_REQUEST)));
           return;
         }
+        log('INFO', 'rpc', `${ip} batch[${parsed.length}]`);
         response = await Promise.all(parsed.map((r) => handleSingle(r, db, upstreamUrl)));
       } else {
+        const method = isValidRequest(parsed) ? parsed.method : '<invalid>';
+        log('INFO', 'rpc', `${ip} ${method}`);
         response = await handleSingle(parsed, db, upstreamUrl);
       }
 
@@ -936,3 +943,4 @@ export function stopRpcServer(): void {
 export function getRpcServer(): Server | null {
   return _server;
 }
+

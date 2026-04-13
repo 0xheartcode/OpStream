@@ -297,7 +297,7 @@ doctor:
 # §7  Docker
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Build the Docker image (context: Opnet-devs/ parent for local OpKit dep)
+# Build the Docker image (context: Opnet-devs/ parent directory)
 docker-build:
     @echo "${BLUE}▶ Building Docker image...${RESET}"
     docker compose build

@@ -51,7 +51,7 @@ src/
   rpc/           OPNET RPC client
   readers/       Pool and token readers (opnet SDK calls)
 tests/           Vitest test files — one per module
-docs/            Usage guides (configuration, websocket, webhooks, querying, opkit)
+docs/            Usage guides (configuration, websocket, webhooks, querying, op-index)
 ```
 
 ---
@@ -67,7 +67,7 @@ docs/            Usage guides (configuration, websocket, webhooks, querying, opk
 
 - Breaking changes to the `WebhookEvent` shape or the DB schema without a migration path
 - New runtime dependencies without prior discussion in an issue
-- Features that belong in OpKit (application-level indexing) rather than OpStream (raw infrastructure)
+- Features that belong in op-index (application-level indexing) rather than OpStream (raw infrastructure)
 
 ---
 

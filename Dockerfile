@@ -1,7 +1,6 @@
 # OpStream — Production Dockerfile
 #
 # Build context: Opnet-devs/ parent directory (one level up from OpStream/)
-# This is required because OpStream depends on a local file: ../OpKit
 #
 # Build manually:
 #   docker build -f OpStream/Dockerfile -t opstream ..
@@ -18,9 +17,6 @@ RUN apk add --no-cache python3 make g++
 
 WORKDIR /app
 
-# Copy OpKit to the path package.json expects: file:../OpKit → /OpKit
-COPY OpKit/ /OpKit/
-
 # Install dependencies (compiles better-sqlite3 native addon here)
 COPY OpStream/package*.json ./
 RUN npm install --prefer-offline
@@ -33,8 +29,7 @@ RUN apk add --no-cache dumb-init
 
 WORKDIR /app
 
-# Bring in OpKit and compiled node_modules from the builder
-COPY --from=builder /OpKit /OpKit
+# Bring in compiled node_modules from the builder
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/package*.json ./
 
@@ -48,7 +43,7 @@ RUN mkdir -p /app/data /app/logs
 # Drop root — run as unprivileged user
 RUN addgroup -g 1001 -S opstream && \
     adduser  -u 1001 -S opstream -G opstream && \
-    chown -R opstream:opstream /app /OpKit
+    chown -R opstream:opstream /app
 USER opstream
 
 ENTRYPOINT ["dumb-init", "--"]

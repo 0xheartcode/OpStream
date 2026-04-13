@@ -3,7 +3,7 @@
  *
  * Thin wrapper around scanner.ts: loads config, opens DB, calls
  * scanBlockRange in chunks. No domain logic, no token metadata, no
- * OP20 labeling — that belongs in OpKit.
+ * OP20 labeling — that belongs in op-index.
  */
 
 import { log } from '../core/logger.js';

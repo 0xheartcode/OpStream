@@ -12,7 +12,7 @@
  *   - mempool_pending                            (pending-tx cache)
  *
  * What it preserves:
- *   - tokens          (owned by OpKit — metadata users provide)
+ *   - tokens          (owned by op-index — metadata users provide)
  *   - runtime_metrics (monitoring counters)
  *   - error_log       (historical diagnostics)
  */

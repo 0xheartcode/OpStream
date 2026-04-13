@@ -1,6 +1,6 @@
 # OpStream — Docker Compose
 #
-# Build context is the Opnet-devs/ parent so the local OpKit dep resolves.
+# Build context is the Opnet-devs/ parent directory.
 # Run from the OpStream/ directory:
 #
 #   SQLite (default — indexer only):

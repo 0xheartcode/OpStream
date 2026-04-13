@@ -32,12 +32,12 @@ const events = queryEvents(db, { contract: myContract, eventName: 'Swapped' });
 
 ```
 Layer 3:  Apps           (your-app, OpScope)
-Layer 2:  OpKit          Indexer framework — defineSchema, createIndexer, event handlers
+Layer 2:  op-index          Indexer framework — defineSchema, createIndexer, event handlers
 Layer 1:  OpStream       Self-hosted archival node — scans once, serves btc_* locally, raw event store
 Layer 0:  OPNET node     Live chain
 ```
 
-OpStream is the [Subsquid Archive](https://github.com/subsquid/squid-sdk) of OPNET: a self-hosted archival node that scans once so every consumer queries instantly. It stores raw event bytes and never decodes them — decoding belongs in OpKit (Layer 2), where each consumer plugs in its own ABI registry.
+OpStream is the [Subsquid Archive](https://github.com/subsquid/squid-sdk) of OPNET: a self-hosted archival node that scans once so every consumer queries instantly. It stores raw event bytes and never decodes them — decoding belongs in op-index (Layer 2), where each consumer plugs in its own ABI registry.
 
 ## Quick Start
 
@@ -117,7 +117,7 @@ These have been run against mainnet and produce correct output:
 - `contract_deployments` captured for every `deployment` tx (deployer address, bytecode SHA-256 hash prefix)
 
 **SubscriptionManager / webhooks** (`src/indexer/webhooks.ts`)
-- Pattern matching: `contract` (case-insensitive), `eventName`. Payload-aware filters (e.g. minimum amount) belong in the consumer (OpKit handlers) since OpStream stores raw bytes only.
+- Pattern matching: `contract` (case-insensitive), `eventName`. Payload-aware filters (e.g. minimum amount) belong in the consumer (op-index handlers) since OpStream stores raw bytes only.
 - HTTP POST delivery with 3 retries, exponential backoff (1 s → 2 s → 4 s), 5 s per-request timeout
 - `WEBHOOK_URLS` env var auto-registers comma-separated URLs as catch-all subscriptions on startup
 - Emits `'broadcast'` EventEmitter event for in-process consumers
@@ -156,17 +156,17 @@ These have been run against mainnet and produce correct output:
 
 ### Not part of OpStream (moved to `src/_pending_extraction/`)
 
-These files exist for reference but **must not be imported** — they belong in OpKit (Layer 3):
+These files exist for reference but **must not be imported** — they belong in op-index (Layer 3):
 
 | File | What it is | Where it belongs |
 |------|------------|-----------------|
-| `candles.ts` | OHLCV candle aggregation from reserve snapshots | OpKit handler |
-| `snapshots.ts` | Reserve snapshot storage + implied price math | OpKit handler |
-| `poolReader.ts` | Raw BinaryWriter/BinaryReader ABI encoding | OpKit reader layer |
-| `candles.test.ts` | Tests for the above (depend on removed `reserve_snapshots` table) | OpKit tests |
+| `candles.ts` | OHLCV candle aggregation from reserve snapshots | op-index handler |
+| `snapshots.ts` | Reserve snapshot storage + implied price math | op-index handler |
+| `poolReader.ts` | Raw BinaryWriter/BinaryReader ABI encoding | op-index reader layer |
+| `candles.test.ts` | Tests for the above (depend on removed `reserve_snapshots` table) | op-index tests |
 
 Pool discovery logic (`processNativeSwapPools`, `processMotoswapPools`, etc.) was removed from
-`bootstrap.ts` in the Layer 2 cleanup and will be reimplemented as OpKit event handlers.
+`bootstrap.ts` in the Layer 2 cleanup and will be reimplemented as op-index event handlers.
 
 ## Commands
 
@@ -207,10 +207,10 @@ Pool discovery logic (`processNativeSwapPools`, `processMotoswapPools`, etc.) wa
 | `blocks` | Full archival block metadata — hash, timestamp, `tx_count` (raw Bitcoin block size), `opnet_tx_count` (OPNET txs we persisted), plus every `IBlockCommon` field needed to serve `btc_getBlockByNumber` / `btc_getBlockByHash` locally with the exact upstream shape (`previous_block_hash`, `previous_block_checksum`, `bits`, `nonce`, `version`, `size`, `weight`, `stripped_size`, `median_time`, `checksum_root`, `merkle_root`, `storage_root`, `receipt_root`, `ema`, `base_gas`, `block_gas_used`, `checksum_proofs`). |
 | `transactions` | OPNET-relevant txs — sender, gas, fees, calldata, revert status, plus `receipt` + `receipt_proofs` for `btc_getTransactionReceipt` archival parity. Non-OPNET Bitcoin txs are skipped by default (see `OPSTREAM_STORE_GENERIC_TXS`). |
 | `tx_outputs` | Bitcoin UTXO outputs per tx — value flows in satoshis |
-| `events` | Raw event bytes from every contract — decoding is OpKit's job, applied at read time |
+| `events` | Raw event bytes from every contract — decoding is op-index's job, applied at read time |
 | `scan_checkpoints` | Scanner progress (resumable) |
 | `contract_deployments` | Contract creation tracking |
-| `tokens` | OP20 metadata cache — written by OpKit, not OpStream |
+| `tokens` | OP20 metadata cache — written by op-index, not OpStream |
 | `runtime_metrics` | Performance counters |
 | `error_log` | Error tracking |
 | `mempool_pending` | Pending OPNET txs from Bitcoin mempool (mempool/full mode) |
@@ -336,20 +336,20 @@ manager.on('broadcast', (event) => {
 });
 ```
 
-## How OpKit Consumes OpStream
+## How op-index Consumes OpStream
 
-OpKit reads directly from OpStream's database (source, read-only) and writes derived,
+op-index reads directly from OpStream's database (source, read-only) and writes derived,
 indexed state into its own database (sink). The two are physically separate: a separate
 SQLite file, or — in Docker — a separate logical database on the same Postgres instance
 (`CREATE DATABASE opstream` and `CREATE DATABASE opkit`). OpStream is never written to by
-OpKit, and OpKit can be wiped and re-derived from the raw archive without touching it.
+op-index, and op-index can be wiped and re-derived from the raw archive without touching it.
 
-Decoding lives entirely in OpKit. Each event is decoded at read time via OpKit's
+Decoding lives entirely in op-index. Each event is decoded at read time via op-index's
 `DECODER_REGISTRY` — adding a new ABI decoder instantly applies to all historical raw
 events, with no rewrite of the OpStream database required.
 
 ```typescript
-import { defineSchema, createIndexer, DbEventSource, openSqlite } from '@opnet-collective/opkit';
+import { defineSchema, createIndexer, DbEventSource, openSqlite } from '@opnet-collective/op-index';
 
 const schema = defineSchema({
   Transfer: {
@@ -361,9 +361,9 @@ const schema = defineSchema({
 });
 
 // source — reads from OpStream's events/transactions/blocks tables (read-only)
-// sink   — OpKit's own database for derived opkit_* tables
+// sink   — op-index's own database for derived opindex_* tables
 const source = new DbEventSource(openSqlite('data/opstream.db'));
-const sink   = openSqlite('data/opkit.db');
+const sink   = openSqlite('data/opindex.db');
 
 const indexer = await createIndexer({ schema, sink, source });
 
@@ -375,7 +375,7 @@ indexer.on('Transferred', async (event, ctx) => {
     value: BigInt(event.decoded['value'] as string),
     block: event.blockNumber,
     // event.fromAddress, event.gasUsed, event.failed, event.blockTimestamp
-    // are all available — populated by the JOIN OpKit runs against OpStream's tables
+    // are all available — populated by the JOIN op-index runs against OpStream's tables
   });
 });
 
@@ -386,8 +386,8 @@ await indexer.sync(941400, currentBlock);
 const stop = indexer.subscribe(currentBlock + 1);
 ```
 
-OpStream doesn't change when you add a new event type or entity. You add a handler in OpKit.
-OpStream's raw tables are the stable foundation; OpKit's derived tables are what your app queries.
+OpStream doesn't change when you add a new event type or entity. You add a handler in op-index.
+OpStream's raw tables are the stable foundation; op-index's derived tables are what your app queries.
 
 ---
 
@@ -516,7 +516,7 @@ decoding its payload.
 
 **No calldata ABI decoding here:** OpStream stores `raw_payload_hex` and `contract_selector`
 only. Decoding pending calldata into structured function calls (e.g., "this is a
-`reserveTokens(tokenX, 5000 sats)`") is OpKit's responsibility — it owns the function
+`reserveTokens(tokenX, 5000 sats)`") is op-index's responsibility — it owns the function
 selector constants and parameter layouts via its `calldataDecoders.ts` registry, mirroring
 the existing `eventDecoders.ts` pattern.
 

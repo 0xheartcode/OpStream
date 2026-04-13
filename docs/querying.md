@@ -240,7 +240,7 @@ The `receipt` and `receipt_proofs` columns were added with the archival commit. 
 | `contract_address` | TEXT | Contract that emitted the event |
 | `event_name` | TEXT | Event type name |
 | `log_index` | INTEGER | Position within the transaction (0-based) |
-| `event_raw` | BLOB | Raw event bytes (decoding is OpKit's job, applied at read time) |
+| `event_raw` | BLOB | Raw event bytes (decoding is op-index's job, applied at read time) |
 | `data_length` | INTEGER | Byte count of `event_raw` |
 
 ### `tx_outputs`

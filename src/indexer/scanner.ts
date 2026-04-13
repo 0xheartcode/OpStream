@@ -329,7 +329,7 @@ const SQL_INSERT_DEPLOY = `
  *
  * This is the pure, generic scanner — no DEX knowledge, no pool discovery.
  * It fetches each block from RPC and stores raw event bytes. Decoding is the
- * consumer's job (e.g. OpKit reads event_raw and applies its decoder registry).
+ * consumer's job (e.g. op-index reads event_raw and applies its decoder registry).
  *
  * All writes for a single block are batched in one transaction to avoid
  * lock contention and improve throughput.

@@ -412,7 +412,7 @@ function runMigrations(db: Database.Database): void {
     }
 
     // Drop the long-deprecated decoded_json columns. OpStream is a raw
-    // archive — decoding belongs in the consumer (OpKit) and runs from
+    // archive — decoding belongs in the consumer (op-index) and runs from
     // event_raw at read time. Old databases scanned with the column get it
     // removed here; new databases never had it. Dropping is destructive
     // (the JSON payloads are gone), but the same data can always be
@@ -420,12 +420,12 @@ function runMigrations(db: Database.Database): void {
     const eventColsCheck = db.prepare('PRAGMA table_info(events)').all() as Array<{ name: string }>;
     if (eventColsCheck.some(c => c.name === 'decoded_json')) {
       db.exec(`ALTER TABLE events DROP COLUMN decoded_json`);
-      applied.push('events.decoded_json dropped (decoding moved to OpKit)');
+      applied.push('events.decoded_json dropped (decoding moved to op-index)');
     }
     const mempoolColsCheck = db.prepare('PRAGMA table_info(mempool_pending)').all() as Array<{ name: string }>;
     if (mempoolColsCheck.some(c => c.name === 'decoded_json')) {
       db.exec(`ALTER TABLE mempool_pending DROP COLUMN decoded_json`);
-      applied.push('mempool_pending.decoded_json dropped (decoding moved to OpKit)');
+      applied.push('mempool_pending.decoded_json dropped (decoding moved to op-index)');
     }
   } catch (err) {
     throw new Error(

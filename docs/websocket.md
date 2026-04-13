@@ -1,7 +1,7 @@
 # WebSocket Broadcast
 
 OpStream can push every indexed event to connected WebSocket clients in real time —
-no polling, no shared database required. This is the foundation for OpKit's Tier-2
+no polling, no shared database required. This is the foundation for op-index's Tier-2
 `WsEventSource`, and it works for any client that speaks RFC 6455.
 
 ---
@@ -118,7 +118,7 @@ interface WebhookEvent {
 are `bigint` values on-chain and JSON has no native 64-bit integer type.
 
 OpStream pushes raw event bytes only — `eventRaw` is the source of truth. Decoding into
-structured fields is the consumer's job (e.g. OpKit applies its `DECODER_REGISTRY` at
+structured fields is the consumer's job (e.g. op-index applies its `DECODER_REGISTRY` at
 read time).
 
 ### Example message
@@ -177,14 +177,14 @@ next dispatch — no memory leak.
 
 ---
 
-## OpKit Integration
+## op-index Integration
 
-OpKit's `WsEventSource` (Tier-2 event source) connects to this WebSocket and feeds
-events into OpKit handlers without requiring shared filesystem access or database polling.
-To use it, point OpKit at OpStream's WS address:
+op-index's `WsEventSource` (Tier-2 event source) connects to this WebSocket and feeds
+events into op-index handlers without requiring shared filesystem access or database polling.
+To use it, point op-index at OpStream's WS address:
 
 ```typescript
-import { createEventSource } from '@opnet-collective/opkit';
+import { createEventSource } from '@opnet-collective/op-index';
 
 const source = createEventSource({
   type: 'ws',
@@ -195,4 +195,4 @@ const indexer = await createIndexer({ schema, sink, source });
 await indexer.subscribe(fromBlock);
 ```
 
-See [opkit-integration.md](./opkit-integration.md) for the full OpKit setup guide.
+See [opkit-integration.md](./opkit-integration.md) for the full op-index setup guide.

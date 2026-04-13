@@ -10,7 +10,7 @@
  *   eventName  — exact event name match  (e.g. 'Swapped', 'SwapExecuted')
  *
  * OpStream stores raw event bytes only — payload-aware filters (e.g. minimum
- * amount) belong in the consumer (OpKit handlers or the downstream service).
+ * amount) belong in the consumer (op-index handlers or the downstream service).
  *
  * Delivery:
  *   - HTTP POST with JSON body (fetch-based, 5s timeout)

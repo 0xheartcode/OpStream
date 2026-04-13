@@ -259,7 +259,7 @@ export async function openPostgresDb(url: string): Promise<PostgresAdapter> {
   await adapter.exec(POSTGRES_SCHEMA);
 
   // Drop the deprecated decoded_json column from existing databases.
-  // Decoding is OpKit's job and runs from event_raw at read time.
+  // Decoding is op-index's job and runs from event_raw at read time.
   // mempool_pending may not exist on a fresh Postgres install — best-effort.
   const applied: string[] = [];
 
@@ -271,7 +271,7 @@ export async function openPostgresDb(url: string): Promise<PostgresAdapter> {
   );
   if (eventsHas?.exists) {
     await adapter.exec(`ALTER TABLE events DROP COLUMN IF EXISTS decoded_json`);
-    applied.push('events.decoded_json dropped (decoding moved to OpKit)');
+    applied.push('events.decoded_json dropped (decoding moved to op-index)');
   }
 
   const mempoolHas = await adapter.get<{ exists: boolean }>(
@@ -282,7 +282,7 @@ export async function openPostgresDb(url: string): Promise<PostgresAdapter> {
   );
   if (mempoolHas?.exists) {
     await adapter.exec(`ALTER TABLE mempool_pending DROP COLUMN IF EXISTS decoded_json`);
-    applied.push('mempool_pending.decoded_json dropped (decoding moved to OpKit)');
+    applied.push('mempool_pending.decoded_json dropped (decoding moved to op-index)');
   }
 
   if (applied.length > 0) {

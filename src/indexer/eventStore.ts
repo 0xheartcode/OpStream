@@ -2,7 +2,7 @@
  * Universal event store for OPNET on-chain events.
  *
  * Stores raw event bytes from every interaction TX. ABI decoding is out of
- * scope — consumers (OpKit) read event_raw from their own database and
+ * scope — consumers (op-index) read event_raw from their own database and
  * produce derived state there.
  *
  * ON CONFLICT DO NOTHING ensures idempotent re-scans.

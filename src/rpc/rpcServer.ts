@@ -27,7 +27,24 @@
  *                all, or richer response shapes that embed events and tx
  *                metadata in one call for indexer consumers:
  *
- *                  opstream_getLogs                events by contract / name / range
+ *                  opstream_getLogs                paginated event log query
+ *
+ *                                                Filter (all fields optional, AND-combined):
+ *                                                  address | contractAddress — string or string[]
+ *                                                  eventName                — string or string[]
+ *                                                  fromBlock | toBlock      — decimal or hex block
+ *                                                  limit                    — default 1000
+ *                                                  afterId                  — keyset cursor
+ *
+ *                                                Response: { items: RpcLogExtended[], hasMore: bool }
+ *                                                  items[].id  — pass as afterId for next page
+ *                                                  hasMore     — true when more rows exist beyond limit
+ *
+ *                                                Pagination pattern:
+ *                                                  page 1: { contractAddress: "op1sq…", limit: 100 }
+ *                                                  page 2: { contractAddress: "op1sq…", limit: 100,
+ *                                                            afterId: <last id from page 1> }
+ *                                                  done when hasMore === false
  *                  opstream_blockNumber            latest indexed checkpoint
  *                  opstream_getBlockByNumber       rich: header + txs + events
  *                  opstream_getBlockByHash         same, by hash
@@ -56,14 +73,38 @@ import { createSyncHandler } from './syncHandler.js';
 // Public types
 // ---------------------------------------------------------------------------
 
-/** Extended RPC log shape — used by opstream_getLogs (Ethereum-compatible filter API). */
+/** Extended RPC log shape — used by opstream_getLogs. */
 export interface RpcLogExtended {
+  id: number;               // row id — pass as afterId to fetch the next page
   address: string;
   topics: string[];         // [eventName]
   data: string;             // event_raw hex, no 0x prefix
   blockNumber: string;      // hex string "0x…" — bigint-safe over JSON
   transactionHash: string;
   logIndex: number;
+}
+
+/**
+ * Paginated response returned by opstream_getLogs.
+ *
+ * Filter shape (params[0]):
+ *   address | contractAddress  string | string[]   contract(s) to filter — OR logic for arrays
+ *   eventName                  string | string[]   event name(s) — plain strings, no ABI hashing
+ *   fromBlock                  number | hex string inclusive lower bound
+ *   toBlock                    number | hex string inclusive upper bound
+ *   limit                      number              max items per page (default 1000)
+ *   afterId                    number              keyset cursor — id of last item from prev page
+ *
+ * Pagination:
+ *   1. Call with { contractAddress: "op1sq…", limit: 100 }
+ *   2. If hasMore === true: call again with { …same filters…, afterId: items.at(-1).id }
+ *   3. Repeat until hasMore === false — no wasted round trips, no COUNT queries.
+ *
+ * All filters compose: block range + contract array + afterId all apply together (AND logic).
+ */
+export interface RpcGetLogsResponse {
+  items:   RpcLogExtended[];
+  hasMore: boolean;
 }
 
 /**
@@ -298,6 +339,7 @@ function bigintToHex(v: string | null): string {
 /** Map a DB event row to the Ethereum-compatible RpcLogExtended shape (used by opstream_getLogs). */
 function rowToLog(row: EventRow & { log_index: number }): RpcLogExtended {
   return {
+    id:               row.id,
     address:          row.contract_address,
     topics:           [row.event_name],
     data:             row.event_raw.toString('hex'),
@@ -395,13 +437,44 @@ async function handleGetLogs(
   }
 
   try {
+    // address / contractAddress — accept single string or array, both naming conventions
+    const rawAddr = filter['address'] ?? filter['contractAddress'];
+    const contract: string | string[] | undefined =
+      typeof rawAddr === 'string'                                  ? rawAddr :
+      Array.isArray(rawAddr) && rawAddr.every(a => typeof a === 'string') ? rawAddr as string[] :
+      undefined;
+
+    // eventName — accept single string or array
+    const rawName = filter['eventName'];
+    const eventName: string | string[] | undefined =
+      typeof rawName === 'string'                                   ? rawName :
+      Array.isArray(rawName) && rawName.every(n => typeof n === 'string') ? rawName as string[] :
+      undefined;
+
+    const limit = typeof filter['limit'] === 'number' && filter['limit'] > 0
+      ? filter['limit']
+      : 1_000;
+    const afterId = typeof filter['afterId'] === 'number'
+      ? filter['afterId']
+      : undefined;
+
+    // Fetch limit+1 rows — if we get the extra one, hasMore=true with no COUNT query.
     const rows = await queryEvents(db, {
-      contract:  typeof filter['address']   === 'string' ? filter['address']   : undefined,
-      eventName: typeof filter['eventName'] === 'string' ? filter['eventName'] : undefined,
+      contract,
+      eventName,
       fromBlock: resolveBlock(filter['fromBlock'], latest),
       toBlock:   resolveBlock(filter['toBlock'],   latest),
+      limit:     limit + 1,
+      afterId,
     });
-    return ok(id, (rows as Array<EventRow & { log_index: number }>).map(rowToLog));
+
+    const hasMore = rows.length > limit;
+    const page    = (hasMore ? rows.slice(0, limit) : rows) as Array<EventRow & { log_index: number }>;
+    const result: RpcGetLogsResponse = {
+      items:   page.map(rowToLog),
+      hasMore,
+    };
+    return ok(id, result);
   } catch (e) {
     return fail(id, { ...INTERNAL_ERROR, message: `Internal error: ${String(e)}` });
   }

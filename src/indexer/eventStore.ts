@@ -31,10 +31,31 @@ export interface EventInput {
 }
 
 export interface EventQuery {
-  contract?: string;
-  eventName?: string;
+  /**
+   * Filter by a single contract address, or an array of addresses (OR logic).
+   * Accepts both 'address' (Ethereum convention) and 'contractAddress' (OpStream convention).
+   */
+  contract?: string | string[];
+  /**
+   * Filter by a single event name, or an array of event names (OR logic).
+   * OpStream stores plain human-readable names (e.g. "Swapped") — no ABI hashing needed.
+   */
+  eventName?: string | string[];
+  /** Return only events at or after this block number. */
   fromBlock?: number;
+  /** Return only events at or before this block number. */
   toBlock?: number;
+  /**
+   * Maximum rows to return. Default: 1 000.
+   * The server fetches limit+1 internally so hasMore can be set without a COUNT query.
+   */
+  limit?: number;
+  /**
+   * Cursor for keyset pagination — return only rows with id > afterId.
+   * Set to items[items.length - 1].id from the previous page to fetch the next page.
+   * Composes correctly with all other filters.
+   */
+  afterId?: number;
 }
 
 const INSERT_SQL = `
@@ -83,14 +104,30 @@ export async function queryEvents(db: DbAdapter, filters: EventQuery): Promise<E
   const clauses: string[] = [];
   const params: unknown[] = [];
 
-  if (filters.contract) {
-    clauses.push('contract_address = ?');
-    params.push(filters.contract);
+  // contract — single address or array (IN clause)
+  if (filters.contract !== undefined) {
+    const addrs = Array.isArray(filters.contract) ? filters.contract : [filters.contract];
+    if (addrs.length === 1) {
+      clauses.push('contract_address = ?');
+      params.push(addrs[0]);
+    } else if (addrs.length > 1) {
+      clauses.push(`contract_address IN (${addrs.map(() => '?').join(', ')})`);
+      params.push(...addrs);
+    }
   }
-  if (filters.eventName) {
-    clauses.push('event_name = ?');
-    params.push(filters.eventName);
+
+  // eventName — single name or array (IN clause)
+  if (filters.eventName !== undefined) {
+    const names = Array.isArray(filters.eventName) ? filters.eventName : [filters.eventName];
+    if (names.length === 1) {
+      clauses.push('event_name = ?');
+      params.push(names[0]);
+    } else if (names.length > 1) {
+      clauses.push(`event_name IN (${names.map(() => '?').join(', ')})`);
+      params.push(...names);
+    }
   }
+
   if (filters.fromBlock !== undefined) {
     clauses.push('block_number >= ?');
     params.push(filters.fromBlock);
@@ -99,9 +136,14 @@ export async function queryEvents(db: DbAdapter, filters: EventQuery): Promise<E
     clauses.push('block_number <= ?');
     params.push(filters.toBlock);
   }
+  if (filters.afterId !== undefined) {
+    clauses.push('id > ?');
+    params.push(filters.afterId);
+  }
 
-  const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
-  const sql = `SELECT * FROM events ${where} ORDER BY block_number, id`;
+  const where        = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+  const effectiveLimit = filters.limit ?? 1_000;
+  const sql          = `SELECT * FROM events ${where} ORDER BY id LIMIT ${effectiveLimit}`;
 
   return db.all<EventRow>(sql, params);
 }

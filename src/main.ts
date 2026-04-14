@@ -252,9 +252,10 @@ async function main(): Promise<void> {
       }
 
       if (config.rpcPort > 0) {
-        const { startRpcServer } = await import('./rpc/rpcServer.js');
+        const { startRpcServer, getRpcServer } = await import('./rpc/rpcServer.js');
         startRpcServer(config.rpcPort, db, config.opnetRpcUrl, config.syncSecret);
-        log('INFO', 'main', `JSON-RPC 2.0 server on http://localhost:${config.rpcPort}`);
+        webhooks.attachToServer(getRpcServer()!);
+        log('INFO', 'main', `JSON-RPC 2.0 + WebSocket on http://localhost:${config.rpcPort}`);
       }
 
       const stopPromises: Promise<void>[] = [];
@@ -368,9 +369,12 @@ async function main(): Promise<void> {
       }
 
       if (config.rpcPort > 0) {
-        const { startRpcServer } = await import('./rpc/rpcServer.js');
+        const { startRpcServer, getRpcServer } = await import('./rpc/rpcServer.js');
         startRpcServer(config.rpcPort, db, config.opnetRpcUrl, config.syncSecret);
-        log('INFO', 'main', `JSON-RPC 2.0 server on http://localhost:${config.rpcPort}`);
+        // Attach WS broadcast to the RPC HTTP server so both share one port.
+        // This enables WebSocket access via the same Railway/public URL as JSON-RPC.
+        webhooks.attachToServer(getRpcServer()!);
+        log('INFO', 'main', `JSON-RPC 2.0 + WebSocket on http://localhost:${config.rpcPort}`);
         if (config.syncSecret) {
           log('INFO', 'main', 'Sync endpoints: /sync/status, /sync/export (auth required)');
         } else {
@@ -443,9 +447,10 @@ async function main(): Promise<void> {
       }
 
       if (config.rpcPort > 0) {
-        const { startRpcServer } = await import('./rpc/rpcServer.js');
+        const { startRpcServer, getRpcServer } = await import('./rpc/rpcServer.js');
         startRpcServer(config.rpcPort, db, config.opnetRpcUrl, config.syncSecret);
-        log('INFO', 'main', `JSON-RPC 2.0 server on http://localhost:${config.rpcPort}`);
+        webhooks.attachToServer(getRpcServer()!);
+        log('INFO', 'main', `JSON-RPC 2.0 + WebSocket on http://localhost:${config.rpcPort}`);
       }
 
       const stopPromises: Promise<void>[] = [];

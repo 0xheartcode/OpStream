@@ -192,7 +192,21 @@ export class SubscriptionManager extends EventEmitter {
       res.end('OpStream WebSocket broadcast server\n');
     });
 
-    this._httpServer.on('upgrade', (req: IncomingMessage, socket: Duplex) => {
+    this.attachToServer(this._httpServer);
+    this._httpServer.listen(port);
+  }
+
+  /**
+   * Attach WebSocket upgrade handling to an **existing** HTTP server.
+   *
+   * This is the preferred path for Railway / single-port deployments: the
+   * JSON-RPC HTTP server and the WebSocket broadcast share the same port.
+   * The server does NOT need to call listen() — that is the caller's job.
+   *
+   * Multiple calls are safe; each call adds another 'upgrade' listener.
+   */
+  attachToServer(server: Server): void {
+    server.on('upgrade', (req: IncomingMessage, socket: Duplex) => {
       const key = req.headers['sec-websocket-key'];
       if (!key || req.headers['upgrade']?.toLowerCase() !== 'websocket') {
         socket.destroy();
@@ -215,8 +229,6 @@ export class SubscriptionManager extends EventEmitter {
       socket.on('close', () => this._wsClients.delete(socket));
       socket.on('error', () => this._wsClients.delete(socket));
     });
-
-    this._httpServer.listen(port);
   }
 
   stopBroadcastServer(): void {

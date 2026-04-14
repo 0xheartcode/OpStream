@@ -181,6 +181,7 @@ Pool discovery logic (`processNativeSwapPools`, `processMotoswapPools`, etc.) wa
 | `live` | Follow chain tip only (assumes already caught up). Includes reorg detection. |
 | `sync` | Fast-sync local DB from a remote OpStream instance via `/sync/export`. Orders of magnitude faster than bootstrap — use this for a cold start. See [Fast Sync](#fast-sync) below. |
 | `sync-live` | Fast-sync then immediately start following the chain tip. The recommended cold-start command — one step instead of `sync && live`. |
+| `batch` | Bootstrap using `opstream_getBlockRange` (batched JSON-RPC) instead of `/sync/export`. Slower than `sync` but works when the remote doesn't expose `/sync/export`. Configurable via `--batch-size N` and `--concurrency N` flags or `BATCH_SIZE` / `BATCH_CONCURRENCY` env vars. |
 | `reset [--yes]` | Truncate all scanned data (blocks, transactions, events, deployments, checkpoints). Destructive — interactive confirmation unless `--yes` or `FORCE=1`. |
 
 ## Environment Variables
@@ -206,6 +207,9 @@ Pool discovery logic (`processNativeSwapPools`, `processMotoswapPools`, etc.) wa
 | `BITCOIN_RPC_PASS` | (none) | Bitcoin Core RPC password |
 | `SYNC_SOURCE_URL` | (none) | Remote OpStream base URL to pull from (used by `sync` command). |
 | `SYNC_SECRET` | (none) | Shared secret for `/sync/*` endpoints. Unset = no auth (open). Server enforces it; client must present the same value. |
+| `SYNC_CONCURRENCY` | `8` | Parallel chunk fetches during `sync` / `sync-live`. Higher = faster on good connections; lower = less load on the remote. |
+| `BATCH_SIZE` | `100` | Blocks per `opstream_getBlockRange` request for the `batch` command. Server hard cap is 1000. |
+| `BATCH_CONCURRENCY` | `8` | Parallel in-flight requests for the `batch` command. |
 
 ## Data Model
 
@@ -412,39 +416,201 @@ RPC_PORT=3001 npx tsx src/main.ts start
 
 **Served locally (archival parity — exact upstream shape, sub-ms):**
 
-| Method | Source | Notes |
-|---|---|---|
-| `btc_getBlockByNumber` | `blocks` table | Full `IBlockCommon` shape incl. `checksumProofs` |
-| `btc_getBlockByHash` | `blocks` table | Same, by block hash |
-| `btc_getTransactionReceipt` | `transactions` + `events` | Full `ITransactionReceipt` shape with `receipt`, `receiptProofs`, events, hex gas |
+#### `btc_getBlockByNumber`
 
-Any opnet-SDK client calling `provider.getBlock(n)` / `provider.getTransactionReceipt(hash)` against OpStream gets these responses answered locally. No SDK changes; the speedup is automatic.
+```json
+{ "method": "btc_getBlockByNumber", "params": [945014] }
+{ "method": "btc_getBlockByNumber", "params": ["0xe6b66", true] }
+{ "method": "btc_getBlockByNumber", "params": ["latest"] }
+```
+
+Params: `[blockNumber: number | hex | "latest", includeTx?: boolean]`
+
+- `includeTx = false` (default) — returns `transactions` as an array of tx hash strings.
+- `includeTx = true` — returns `transactions` as full `IBlockCommon`-shaped objects.
+
+Response matches the upstream `btc_getBlockByNumber` shape exactly — every `IBlockCommon` field including `checksumProofs`, `storageRoot`, `receiptRoot`, etc.
+
+#### `btc_getBlockByHash`
+
+```json
+{ "method": "btc_getBlockByHash", "params": ["0000000000000000000abc..."] }
+{ "method": "btc_getBlockByHash", "params": ["0000000000000000000abc...", true] }
+```
+
+Params: `[blockHash: string, includeTx?: boolean]` — same response shape as `btc_getBlockByNumber`.
+
+#### `btc_getTransactionReceipt`
+
+```json
+{ "method": "btc_getTransactionReceipt", "params": ["a3f8c1...txhash"] }
+```
+
+Params: `[txHash: string]`
+
+Returns the `ITransactionReceipt` shape: tx metadata + `receipt` (raw bytes, base64) + `receiptProofs` (hex array) + inline `events` array. Returns `null` for unknown hashes.
 
 **Proxied to upstream (live chain state, tx submission, or too-heavy shapes):**
 
-Everything else in the upstream method list — `btc_blockNumber` (chain tip), `btc_call`, `btc_getBalance`, `btc_getStorageAt`, `btc_getCode`, `btc_sendRawTransaction`, `btc_getUTXOs`, `btc_getTransactionByHash` (20+ fields incl. raw bytes and `pow` we don't store), all mempool and epoch methods, etc. Proxied unchanged to `OPNET_RPC_URL` + `/api/v1/json-rpc`.
+Everything else — `btc_blockNumber` (chain tip), `btc_call`, `btc_getBalance`, `btc_getStorageAt`, `btc_getCode`, `btc_sendRawTransaction`, `btc_getUTXOs`, `btc_getTransactionByHash`, all mempool and epoch methods, etc. Proxied unchanged to `OPNET_RPC_URL` + `/api/v1/json-rpc`.
 
-The proxy is gated by an **allowlist of 25 known upstream methods**, taken verbatim from `opnet/build/providers/interfaces/JSONRpcMethods.js`. Any `btc_*` name not on the allowlist (typos, deprecated methods, unknown aliases) returns a local `-32601 Method not found` without a network round trip.
+The proxy is gated by an **allowlist of 25 known upstream methods**. Any `btc_*` name not on the allowlist (typos, deprecated methods) returns a local `-32601 Method not found` without a network round trip.
+
+Any opnet-SDK client pointing at OpStream gets the `btc_*` responses answered locally with no code changes — the speedup is automatic.
+
+---
 
 ### `opstream_*` — OpStream extensions
 
-Queries upstream doesn't support at all, or richer shapes that embed events and tx metadata in one call for indexer consumers.
+Queries upstream doesn't support at all, or richer shapes that embed events and tx metadata in one call for indexer consumers. All methods are served from the local index — no upstream round trip.
 
-| Method | Purpose |
-|---|---|
-| `opstream_getLogs` | Events by contract / event name / block range. O(1) indexed SQL. No upstream equivalent. |
-| `opstream_blockNumber` | Latest indexed checkpoint (lags chain tip during catchup). Use `btc_blockNumber` for the live tip. |
-| `opstream_getBlockByNumber` | Block header + every OPNET tx in the block + nested events. |
-| `opstream_getBlockByHash` | Same, by block hash. |
-| `opstream_getBlockRange` | Array of blocks for a range — full 22-field archival header + txs + events per block. Max 100 blocks. Params: `[fromBlock, toBlock, {includeTx?, includeEvents?}]`. |
-| `opstream_getBlockReceipts` | Every tx + its events for a block in one call. |
-| `opstream_getTransaction` | Tx metadata + all events by tx hash. |
-| `opstream_getTransactionReceipt` | Rich local receipt with tx metadata inline. |
-| `opstream_getCodeHash` | 8-byte truncated SHA-256 of contract bytecode from `contract_deployments`. Returns `null` for addresses not in the local index. |
+#### `opstream_blockNumber`
+
+```json
+{ "method": "opstream_blockNumber", "params": [] }
+```
+
+Returns the latest **indexed** checkpoint as a hex string (e.g. `"0xe6b66"`). Lags the live chain tip during catchup. Use `btc_blockNumber` (proxied) for the real chain tip.
+
+#### `opstream_getLogs`
+
+```json
+{
+  "method": "opstream_getLogs",
+  "params": [{
+    "address":   "bc1qmycontract…",
+    "eventName": "Swapped",
+    "fromBlock": 942000,
+    "toBlock":   943000
+  }]
+}
+```
+
+Params: `[{ address?: string, eventName?: string, fromBlock?: number | hex | "latest", toBlock?: number | hex | "latest" }]`
+
+All filter fields are optional; omitting `address` or `eventName` matches all contracts / event types. Returns an array of log objects:
+
+```json
+[{
+  "address":         "bc1qcontract…",
+  "topics":          ["Swapped"],
+  "data":            "deadbeef…",
+  "blockNumber":     "0xe6b66",
+  "transactionHash": "a3f8c1…",
+  "logIndex":        0
+}]
+```
+
+#### `opstream_getBlockByNumber`
+
+```json
+{ "method": "opstream_getBlockByNumber", "params": [945014, false] }
+{ "method": "opstream_getBlockByNumber", "params": ["latest", true] }
+```
+
+Params: `[blockNumber: number | hex | "latest", includeTx?: boolean]`
+
+- `includeTx = false` (default) — header + `transactions` as tx hash strings.
+- `includeTx = true` — header + full tx objects with inline events per tx.
+
+Returns `null` for blocks not in the local index.
+
+#### `opstream_getBlockByHash`
+
+```json
+{ "method": "opstream_getBlockByHash", "params": ["0000000000000000000abc...", true] }
+```
+
+Params: `[blockHash: string, includeTx?: boolean]` — same response shape as `opstream_getBlockByNumber`.
+
+#### `opstream_getBlockReceipts`
+
+```json
+{ "method": "opstream_getBlockReceipts", "params": [945014] }
+{ "method": "opstream_getBlockReceipts", "params": ["latest"] }
+```
+
+Params: `[blockNumber: number | hex | "latest"]`
+
+Returns every OPNET tx in the block with its events embedded — equivalent to calling `opstream_getBlockByNumber(n, true)` but optimised for receipt-only consumers. Response shape:
+
+```json
+{
+  "block_number": 945014,
+  "block_hash":   "0000…",
+  "timestamp":    1718400000,
+  "tx_count":     312,
+  "transactions": [{ "hash": "…", "events": [ … ] }]
+}
+```
+
+#### `opstream_getBlockRange`
+
+```json
+{
+  "method": "opstream_getBlockRange",
+  "params": [945000, 945099, { "includeTx": true, "includeEvents": true }]
+}
+```
+
+Params: `[fromBlock: number | hex | "latest", toBlock: number | hex | "latest", opts?: { includeTx?: boolean, includeEvents?: boolean }]`
+
+Returns an array of up to **1000 blocks** (hard cap). Each block has the full 22-field archival header (`IBlockCommon` shape) plus a `deployments` array.
+
+- `includeTx = false` (default) — `transactions` is an array of tx hashes.
+- `includeTx = true` — full tx objects with all archival columns (`calldata`, `receipt`, `receiptProofs`, `senderPubKeyHash`, `specialGasUsed`).
+- `includeEvents = true` — events embedded inside each tx object (requires `includeTx = true`).
+
+When the requested range would exceed **10 000 txs** or **50 000 events**, the call returns `-32602` with a suggested smaller `toBlock`. The `batch` command handles this automatically by halving the range and retrying.
+
+#### `opstream_getTransaction`
+
+```json
+{ "method": "opstream_getTransaction", "params": ["a3f8c1…txhash"] }
+```
+
+Params: `[txHash: string]`
+
+Returns tx metadata + all events for that tx. Returns `null` for unknown hashes. Response:
+
+```json
+{
+  "hash":            "a3f8c1…",
+  "blockNumber":     "0xe6b66",
+  "index":           3,
+  "OPNetType":       "interaction",
+  "from":            "bc1qsender…",
+  "contractAddress": "bc1qcontract…",
+  "gasUsed":         "0x2107bd23",
+  "burnedBitcoin":   "0x1e8480",
+  "priorityFee":     "0x0",
+  "events": [{ "contractAddress": "…", "type": "Swapped", "data": "<base64>" }]
+}
+```
+
+#### `opstream_getTransactionReceipt`
+
+```json
+{ "method": "opstream_getTransactionReceipt", "params": ["a3f8c1…txhash"] }
+```
+
+Params: `[txHash: string]`
+
+Same as `opstream_getTransaction` — tx metadata with inline events. Semantically equivalent to `btc_getTransactionReceipt` but serves OpStream's richer local shape rather than the slim upstream receipt.
+
+#### `opstream_getCodeHash`
+
+```json
+{ "method": "opstream_getCodeHash", "params": ["bc1qcontract…"] }
+```
+
+Params: `[contractAddress: string]`
+
+Returns the first 16 hex chars of the SHA-256 of the contract's deployment bytecode (e.g. `"a3f8c1d2b4e5f601"`), or `null` if the address is not in `contract_deployments`. Only covers contracts deployed at or after `BOOTSTRAP_FROM_BLOCK`. For pre-bootstrap contracts use `btc_getCode` (proxied to upstream).
 
 ### Archival completeness
 
-Header fields used by `btc_getBlockByNumber` / `ByHash` (`previousBlockHash`, `merkleRoot`, `storageRoot`, `receiptRoot`, `checksumProofs`, etc.) are added to the `blocks` table schema. Receipt fields used by `btc_getTransactionReceipt` (`receipt`, `receiptProofs`) are on `transactions`.
+Header fields used by `btc_getBlockByNumber` / `ByHash` (`previousBlockHash`, `merkleRoot`, `storageRoot`, `receiptRoot`, `checksumProofs`, etc.) are stored in the `blocks` table. Receipt fields used by `btc_getTransactionReceipt` (`receipt`, `receiptProofs`) are on `transactions`. Rows scanned before the archival schema additions have `NULL` for those columns until rescanned.
 
 **Rows scanned before the archival schema additions have NULL for these fields** — the response is still valid JSON-RPC but the specific fields come back `null`. A fresh `reset` + `bootstrap` populates everything from the opnet SDK's block / receipt responses, which is where the fields come from in the first place.
 

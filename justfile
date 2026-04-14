@@ -70,6 +70,26 @@ live:
     @echo "${BLUE}▶ Starting live indexer...${RESET}"
     npx tsx src/main.ts live
 
+# Fast-sync from a remote OpStream instance (set SYNC_SOURCE_URL in .env)
+sync:
+    @echo "${BLUE}▶ Syncing from remote OpStream instance...${RESET}"
+    npx tsx src/main.ts sync
+
+# Fast-sync then immediately follow chain tip (recommended cold-start)
+sync-live:
+    @echo "${BLUE}▶ Syncing then going live...${RESET}"
+    npx tsx src/main.ts sync-live
+
+# Bootstrap using batched opstream_getBlockRange JSON-RPC
+batch:
+    @echo "${BLUE}▶ Running batch bootstrap...${RESET}"
+    npx tsx src/main.ts batch
+
+# Reset all scanned data so the next bootstrap starts fresh (prompts for confirmation)
+reset:
+    @echo "${RED}${BOLD}⚠  This will TRUNCATE all scanned tables.${RESET}"
+    npx tsx src/main.ts reset
+
 # ══════════════════════════════════════════════════════════════════════════════
 # §3  Develop / Validate
 # ══════════════════════════════════════════════════════════════════════════════

@@ -1,14 +1,27 @@
-# WebSocket Broadcast
+# WebSocket API
 
-OpStream can push every indexed event to connected WebSocket clients in real time —
-no polling, no shared database required. This is the foundation for op-index's Tier-2
-`WsEventSource`, and it works for any client that speaks RFC 6455.
+OpStream's WebSocket server has two operating modes on the same connection:
+
+- **Subscribed mode** — send `opstream_subscribe` on connect; the server pushes only events
+  that match your filter. This is the recommended mode for bots, dashboards, and op-index.
+- **Broadcast mode** (legacy) — connect without subscribing; every indexed event is pushed to
+  you unfiltered. Old clients continue to work unchanged.
+
+The server performs a standard RFC 6455 HTTP upgrade — no custom headers or auth tokens needed.
 
 ---
 
-## Enabling the Server
+## Endpoints
 
-Set `WS_PORT` to a non-zero port before starting:
+| Network | URL |
+|---|---|
+| Testnet | `wss://opstream-testnet-production.up.railway.app` |
+| Mainnet | `wss://opstream-mainnet-production.up.railway.app` |
+| Local | `ws://localhost:8080` (set `WS_PORT=8080`) |
+
+---
+
+## Enabling the Server (self-hosted)
 
 ```bash
 WS_PORT=8080 npx tsx src/main.ts start
@@ -16,122 +29,417 @@ WS_PORT=8080 npx tsx src/main.ts start
 WS_PORT=8080 just start
 ```
 
-The server starts alongside the live indexer. Events are broadcast as they are committed
-to the database — after each block's transaction is confirmed, not speculatively.
+---
+
+## Subscription Protocol
+
+All messages are JSON-RPC 2.0 frames. Client → server frames must be masked (RFC 6455);
+server → client frames are unmasked. Standard WS client libraries handle this automatically.
+
+### Subscribe
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "opstream_subscribe",
+  "params": ["<kind>", <filter>]
+}
+```
+
+**Response:**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": "0xa1b2c3d4e5f6g7h8"
+}
+```
+
+The `result` is the subscription ID. Save it — you need it to unsubscribe.
+
+### Unsubscribe
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "opstream_unsubscribe",
+  "params": ["0xa1b2c3d4e5f6g7h8"]
+}
+```
+
+**Response:**
+
+```json
+{"jsonrpc":"2.0","id":2,"result":true}
+```
+
+When the last subscription on a connection is removed the server reverts the connection
+to broadcast mode.
+
+### Notifications
+
+Every matched event is pushed as:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "opstream_subscription",
+  "params": {
+    "subscription": "0xa1b2c3d4e5f6g7h8",
+    "result": { ...event... }
+  }
+}
+```
 
 ---
 
-## Connecting
+## Subscription Types
 
-Any RFC 6455 WebSocket client works. The server performs a standard HTTP upgrade handshake
-(`Sec-WebSocket-Accept` per the spec) — no custom headers or auth tokens needed.
+### `logs` — Filtered Contract Events
 
-### Browser
+Receives confirmed on-chain events matching the filter. Mempool events (`blockNumber: -1`)
+are excluded — use `txStatus` for those.
 
-```javascript
-const ws = new WebSocket('ws://localhost:8080');
+**Filter fields** (all optional, AND-combined):
 
-ws.addEventListener('message', (msg) => {
-  const event = JSON.parse(msg.data);
-  console.log(event.eventName, event.contractAddress, event.blockNumber);
-});
+| Field | Type | Description |
+|---|---|---|
+| `address` | `string` | Only events from this contract address |
+| `eventNames` | `string[]` | Only events with these names |
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "opstream_subscribe",
+  "params": ["logs", {
+    "address": "op1sq…",
+    "eventNames": ["Swapped", "Synced"]
+  }]
+}
 ```
 
-### Node.js (ws package)
+**No filter** — receive every confirmed event from every contract:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"opstream_subscribe","params":["logs",{}]}
+```
+
+**Notification example:**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "opstream_subscription",
+  "params": {
+    "subscription": "0xa1b2c3d4e5f6g7h8",
+    "result": {
+      "blockNumber": 14370,
+      "txHash": "a3f8c1…",
+      "contractAddress": "op1sq…",
+      "eventName": "Swapped",
+      "logIndex": 0,
+      "txIndex": 2,
+      "blockTimestamp": 1776248919,
+      "fromAddress": "bc1qsender…",
+      "gasUsed": "12000",
+      "burnedBitcoin": "800",
+      "failed": false,
+      "revertReason": null,
+      "eventRaw": "0x0007a120000000000000bc07"
+    }
+  }
+}
+```
+
+---
+
+### `newBlocks` — Block Headers
+
+Receives one notification per confirmed block. No filter object needed.
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"opstream_subscribe","params":["newBlocks",{}]}
+```
+
+**Notification example:**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "opstream_subscription",
+  "params": {
+    "subscription": "0xa1b2c3d4e5f6g7h8",
+    "result": {
+      "blockNumber": 14371,
+      "txHash": "",
+      "contractAddress": "",
+      "eventName": "NewBlock",
+      "blockTimestamp": 1776249500,
+      "failed": false
+    }
+  }
+}
+```
+
+---
+
+### `txStatus` — Mempool Transaction Lifecycle
+
+Tracks a specific transaction from submission through confirmation or eviction.
+Pushes `MempoolPending` when the tx appears in the mempool, then either
+`MempoolConfirmed` when it lands in a block, or `MempoolDropped` when it is
+evicted without confirming.
+
+**Filter:** `{ txid: string }` — required.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "opstream_subscribe",
+  "params": ["txStatus", { "txid": "a3f8c1…" }]
+}
+```
+
+**Notification sequence:**
+
+1. **MempoolPending** — tx first seen in mempool:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "opstream_subscription",
+  "params": {
+    "subscription": "0xa1b2c3d4e5f6g7h8",
+    "result": {
+      "blockNumber": -1,
+      "txHash": "a3f8c1…",
+      "contractAddress": "",
+      "eventName": "MempoolPending",
+      "failed": false
+    }
+  }
+}
+```
+
+2a. **MempoolConfirmed** — tx included in a block:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "opstream_subscription",
+  "params": {
+    "subscription": "0xa1b2c3d4e5f6g7h8",
+    "result": {
+      "blockNumber": 14370,
+      "txHash": "a3f8c1…",
+      "contractAddress": "op1sq…",
+      "eventName": "MempoolConfirmed",
+      "failed": false
+    }
+  }
+}
+```
+
+2b. **MempoolDropped** — tx evicted from mempool without confirming:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "opstream_subscription",
+  "params": {
+    "subscription": "0xa1b2c3d4e5f6g7h8",
+    "result": {
+      "blockNumber": -1,
+      "txHash": "a3f8c1…",
+      "contractAddress": "",
+      "eventName": "MempoolDropped",
+      "failed": false
+    }
+  }
+}
+```
+
+> **HTTP alternative:** If you don't want to maintain a WebSocket connection (scripts,
+> serverless functions, CLI), use `opstream_getTransactionStatus` over HTTP instead.
+> See [rpc.md](./rpc.md#opstream_gettransactionstatus).
+
+---
+
+## Full Event Payload Shape
+
+All events pushed over WebSocket share the same shape:
+
+```typescript
+interface WebhookEvent {
+  blockNumber:     number;        // block height; -1 for mempool events
+  txHash:          string;        // transaction ID
+  contractAddress: string;        // contract that emitted the event
+  eventName:       string;        // e.g. "Swapped", "MempoolPending", "NewBlock"
+  logIndex?:       number;        // position within tx (0-based); absent for synthetic events
+  txIndex?:        number;        // transaction's position in the block
+  blockTimestamp?: number;        // unix seconds; absent for mempool events
+  fromAddress?:    string | null; // sender address
+  gasUsed?:        string | null; // gas consumed (decimal string, satoshi units)
+  burnedBitcoin?:  string | null; // BTC fee burned (decimal string, satoshi units)
+  failed:          boolean;       // true if the transaction reverted
+  revertReason?:   string | null; // revert message (null if not reverted)
+  eventRaw?:       string;        // raw event bytes, hex-encoded; absent for synthetic events
+}
+```
+
+`gasUsed` and `burnedBitcoin` are decimal strings — on-chain values are `bigint` and JSON
+has no native 64-bit integer type. OpStream pushes raw event bytes in `eventRaw`; decoding
+into structured fields is the consumer's job (op-index applies its decoder registry at read time).
+
+---
+
+## Client Examples
+
+### Node.js — subscribe and filter
 
 ```javascript
 import WebSocket from 'ws';
 
-const ws = new WebSocket('ws://localhost:8080');
+const ws = new WebSocket('wss://opstream-testnet-production.up.railway.app');
+let subId = null;
+
+ws.on('open', () => {
+  // Subscribe to Swapped events from a specific contract
+  ws.send(JSON.stringify({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'opstream_subscribe',
+    params: ['logs', {
+      address: 'op1sq…',
+      eventNames: ['Swapped'],
+    }],
+  }));
+});
 
 ws.on('message', (data) => {
-  const event = JSON.parse(data.toString());
-  console.log(event);
+  const msg = JSON.parse(data.toString());
+
+  // Handle subscribe response
+  if (msg.id === 1 && msg.result) {
+    subId = msg.result;
+    console.log('subscribed:', subId);
+    return;
+  }
+
+  // Handle pushed notifications
+  if (msg.method === 'opstream_subscription') {
+    const event = msg.params.result;
+    console.log(event.eventName, event.blockNumber, event.txHash);
+  }
+});
+
+ws.on('close', () => console.log('disconnected'));
+ws.on('error', (err) => console.error('ws error', err));
+```
+
+### Node.js — track a tx from broadcast to confirm
+
+```javascript
+import WebSocket from 'ws';
+
+const TXID = 'a3f8c1…'; // your submitted txid
+
+const ws = new WebSocket('wss://opstream-testnet-production.up.railway.app');
+
+ws.on('open', () => {
+  ws.send(JSON.stringify({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'opstream_subscribe',
+    params: ['txStatus', { txid: TXID }],
+  }));
+});
+
+ws.on('message', (data) => {
+  const msg = JSON.parse(data.toString());
+  if (msg.method !== 'opstream_subscription') return;
+
+  const { eventName, blockNumber } = msg.params.result;
+
+  if (eventName === 'MempoolPending') {
+    console.log('tx is in the mempool');
+  } else if (eventName === 'MempoolConfirmed') {
+    console.log(`confirmed in block ${blockNumber}`);
+    ws.close();
+  } else if (eventName === 'MempoolDropped') {
+    console.log('tx was dropped — resubmit?');
+    ws.close();
+  }
 });
 ```
 
-### Node.js (built-in, no deps)
+### Node.js — subscribe to new blocks
 
 ```javascript
-import { createConnection } from 'net';
-import { createHash } from 'crypto';
+import WebSocket from 'ws';
 
-// Minimal WS client — useful for debugging
-const key = Buffer.from(Math.random().toString()).toString('base64');
-const accept = createHash('sha1')
-  .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
-  .digest('base64');
+const ws = new WebSocket('wss://opstream-testnet-production.up.railway.app');
 
-const socket = createConnection(8080, 'localhost', () => {
-  socket.write(
-    'GET / HTTP/1.1\r\n' +
-    'Host: localhost:8080\r\n' +
-    'Upgrade: websocket\r\n' +
-    'Connection: Upgrade\r\n' +
-    `Sec-WebSocket-Key: ${key}\r\n` +
-    'Sec-WebSocket-Version: 13\r\n\r\n'
-  );
+ws.on('open', () => {
+  ws.send(JSON.stringify({
+    jsonrpc: '2.0', id: 1,
+    method: 'opstream_subscribe',
+    params: ['newBlocks', {}],
+  }));
 });
 
-socket.on('data', (chunk) => {
-  // Skip the HTTP 101 header, then parse frames
-  const text = chunk.toString();
-  if (text.startsWith('HTTP/1.1 101')) return; // handshake response
-  // Frame parsing: byte[0]=0x81 (text), byte[1]=len, rest=payload
-  const payload = chunk.subarray(2, 2 + chunk[1]);
-  console.log(JSON.parse(payload.toString()));
+ws.on('message', (data) => {
+  const msg = JSON.parse(data.toString());
+  if (msg.method === 'opstream_subscription') {
+    const { blockNumber, blockTimestamp } = msg.params.result;
+    console.log(`block ${blockNumber} at ${new Date(blockTimestamp * 1000).toISOString()}`);
+  }
+});
+```
+
+### Browser
+
+```javascript
+const ws = new WebSocket('wss://opstream-testnet-production.up.railway.app');
+
+ws.addEventListener('open', () => {
+  ws.send(JSON.stringify({
+    jsonrpc: '2.0', id: 1,
+    method: 'opstream_subscribe',
+    params: ['logs', { address: 'op1sq…', eventNames: ['Swapped'] }],
+  }));
+});
+
+ws.addEventListener('message', ({ data }) => {
+  const msg = JSON.parse(data);
+  if (msg.method === 'opstream_subscription') {
+    const event = msg.params.result;
+    // update UI
+  }
 });
 ```
 
 ---
 
-## Event Payload
+## Broadcast Mode (Legacy)
 
-Every message is a JSON-encoded `WebhookEvent`. All fields are present on every event.
-
-```typescript
-interface WebhookEvent {
-  // ── Core identity ─────────────────────────────────────────────────────────
-  blockNumber:     number;        // block height
-  txHash:          string;        // transaction ID
-  contractAddress: string;        // contract that emitted the event
-  eventName:       string;        // e.g. "Swapped", "Transfer", "Synced"
-
-  // ── Position within the block ─────────────────────────────────────────────
-  logIndex:        number;        // event's position within its transaction (0-based)
-  txIndex:         number;        // transaction's position within the block (0-based)
-  blockTimestamp:  number;        // unix timestamp of the block
-
-  // ── Transaction context ───────────────────────────────────────────────────
-  fromAddress:     string | null; // address that submitted the transaction
-  gasUsed:         string | null; // gas consumed, as a decimal string (satoshi units)
-  burnedBitcoin:   string | null; // BTC burned as fee, as a decimal string (satoshi units)
-  failed:          boolean;       // true if the transaction reverted
-  revertReason:    string | null; // revert message, or null if not reverted
-
-  // ── Raw bytes ─────────────────────────────────────────────────────────────
-  eventRaw:        string;        // raw event bytes, hex-encoded, e.g. "0x1a2b3c…"
-}
-```
-
-`gasUsed` and `burnedBitcoin` are serialised as decimal strings (not numbers) because they
-are `bigint` values on-chain and JSON has no native 64-bit integer type.
-
-OpStream pushes raw event bytes only — `eventRaw` is the source of truth. Decoding into
-structured fields is the consumer's job (e.g. op-index applies its `DECODER_REGISTRY` at
-read time).
-
-### Example message
+Connections that never send `opstream_subscribe` receive every indexed event — same payload
+shape, no JSON-RPC wrapper, raw object per message:
 
 ```json
 {
-  "blockNumber": 942381,
+  "blockNumber": 14370,
   "txHash": "a3f8c1…",
-  "contractAddress": "bc1q…",
+  "contractAddress": "op1sq…",
   "eventName": "Swapped",
   "logIndex": 0,
-  "txIndex": 3,
-  "blockTimestamp": 1718400123,
+  "txIndex": 2,
+  "blockTimestamp": 1776248919,
   "fromAddress": "bc1qsender…",
   "gasUsed": "12000",
   "burnedBitcoin": "800",
@@ -141,58 +449,26 @@ read time).
 }
 ```
 
----
-
-## Filtering Client-Side
-
-The server broadcasts every event to every connected client — there is no server-side
-subscription filter on the WebSocket channel. Filter in your client handler:
-
-```javascript
-ws.addEventListener('message', (msg) => {
-  const event = JSON.parse(msg.data);
-
-  // Only process events from a specific contract
-  if (event.contractAddress !== MY_CONTRACT) return;
-
-  // Only process specific event types
-  if (event.eventName !== 'Swapped') return;
-
-  // Skip reverted transactions
-  if (event.failed) return;
-
-  handle(event);
-});
-```
-
-If you need server-side filtering, use [webhooks](./webhooks.md) with a pattern subscription instead.
-
----
-
-## Multiple Clients
-
-Any number of clients can connect simultaneously. The server writes each broadcast to
-every connected socket. Dead sockets (write throws) are evicted automatically on the
-next dispatch — no memory leak.
+This is the mode op-index's `WsEventSource` used before 0.1.3 — it still works on all
+server versions. New code should use the subscription protocol instead.
 
 ---
 
 ## op-index Integration
 
-op-index's `WsEventSource` (Tier-2 event source) connects to this WebSocket and feeds
-events into op-index handlers without requiring shared filesystem access or database polling.
-To use it, point op-index at OpStream's WS address:
+op-index's `WsEventSource` (Tier-2 event source) sends `opstream_subscribe("logs", filter)`
+on connect and handles all three message paths transparently — subscribed notifications,
+JSON-RPC acks, and legacy broadcast frames — so it works against any server version.
 
 ```typescript
 import { createEventSource } from '@opnet-collective/op-index';
 
 const source = createEventSource({
-  type: 'ws',
-  url: 'ws://opstream-host:8080',
+  ws: 'wss://opstream-testnet-production.up.railway.app',
 });
 
 const indexer = await createIndexer({ schema, sink, source });
 await indexer.subscribe(fromBlock);
 ```
 
-See [op-index-integration.md](./op-index-integration.md) for the full op-index setup guide.
+See [op-index-integration.md](./op-index-integration.md) for the full setup guide.

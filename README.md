@@ -849,8 +849,9 @@ just check         # typecheck + lint + test in one shot
 
 | Guide | What it covers |
 |-------|---------------|
+| [docs/rpc.md](./docs/rpc.md) | **Start here** — all HTTP JSON-RPC methods (`opstream_*`, `btc_*`), params, response shapes, curl examples |
+| [docs/websocket.md](./docs/websocket.md) | WebSocket subscriptions (`logs`, `newBlocks`, `txStatus`), notification format, client examples |
 | [docs/configuration.md](./docs/configuration.md) | All environment variables, `.env` setup, Postgres, Docker |
-| [docs/websocket.md](./docs/websocket.md) | WS client setup, full enriched payload schema, multi-client |
 | [docs/webhooks.md](./docs/webhooks.md) | HTTP delivery, programmatic subscriptions, pattern matching, retry |
 | [docs/querying.md](./docs/querying.md) | SQL patterns, full schema reference, compound query examples |
 | [docs/op-index-integration.md](./docs/op-index-integration.md) | Tier 1/2/3 event sources, ABI decoder injection, DB layout |

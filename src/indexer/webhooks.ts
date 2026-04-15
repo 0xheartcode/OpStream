@@ -21,10 +21,15 @@
  *   - SubscriptionManager extends EventEmitter; emits 'broadcast' on dispatch()
  *   - Attach listeners for WebSocket forwarding or in-process consumers
  *
- * WebSocket support:
- *   - startBroadcastServer(port) starts a minimal Node.js HTTP server that
- *     upgrades connections and broadcasts each dispatched event as JSON text
- *   - stopBroadcastServer() tears it down
+ * WebSocket support (two modes):
+ *   Legacy broadcast — startBroadcastServer(port) or attachToServer(server) without
+ *     a WsSessionManager: every event is sent as a plain JSON text frame to all clients.
+ *     Backward-compatible with old WsEventSource consumers.
+ *
+ *   Stateful subscriptions — call setWsSessionManager(mgr) before attachToServer():
+ *     new connections are handed to WsSessionManager. Each client can send
+ *     opstream_subscribe / opstream_unsubscribe JSON-RPC calls and receives
+ *     server-side-filtered push notifications. Old broadcast path unused.
  */
 
 import { EventEmitter } from 'node:events';
@@ -32,6 +37,7 @@ import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
 import type { IncomingMessage, ServerResponse, Server } from 'node:http';
 import type { Duplex } from 'node:stream';
+import type { WsSessionManager } from './wsSessionManager.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -92,6 +98,12 @@ export class SubscriptionManager extends EventEmitter {
   private _idCounter = 0;
   private _httpServer: Server | null = null;
   private readonly _wsClients = new Set<Duplex>();
+  private _wsSessionManager: WsSessionManager | null = null;
+
+  /** Wire a WsSessionManager to handle all new WebSocket connections. */
+  setWsSessionManager(mgr: WsSessionManager): void {
+    this._wsSessionManager = mgr;
+  }
 
   // ── Registration ──────────────────────────────────────────────────────────
 
@@ -135,7 +147,9 @@ export class SubscriptionManager extends EventEmitter {
   dispatch(event: WebhookEvent): void {
     this.emit('broadcast', event);
 
-    if (this._wsClients.size > 0) {
+    if (this._wsSessionManager !== null) {
+      this._wsSessionManager.dispatch(event);
+    } else if (this._wsClients.size > 0) {
       const json = JSON.stringify(event);
       const frame = this._encodeWsTextFrame(json);
       for (const client of this._wsClients) {
@@ -225,9 +239,13 @@ export class SubscriptionManager extends EventEmitter {
         '\r\n',
       );
 
-      this._wsClients.add(socket);
-      socket.on('close', () => this._wsClients.delete(socket));
-      socket.on('error', () => this._wsClients.delete(socket));
+      if (this._wsSessionManager !== null) {
+        this._wsSessionManager.addConnection(socket);
+      } else {
+        this._wsClients.add(socket);
+        socket.on('close', () => this._wsClients.delete(socket));
+        socket.on('error', () => this._wsClients.delete(socket));
+      }
     });
   }
 

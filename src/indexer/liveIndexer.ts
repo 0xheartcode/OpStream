@@ -22,7 +22,7 @@ import {
   deleteBlockDataFrom,
   saveCheckpoint,
 } from './scanner.js';
-import type { ScanResult, OnEventCallback } from './scanner.js';
+import type { ScanResult, OnEventCallback, ScanOptions } from './scanner.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -49,6 +49,8 @@ export interface LiveIndexerOptions {
   onEvent?: OnEventCallback;
   /** Forwarded to scanBlockRange — see ScanOptions.storeGenericTxs. Default false. */
   storeGenericTxs?: boolean;
+  /** Forwarded to scanBlockRange — called once per block after all events are dispatched. */
+  onBlockConfirmed?: ScanOptions['onBlockConfirmed'];
 }
 
 export interface LiveIndexerHealth {
@@ -141,6 +143,7 @@ export function startLiveIndexer(
   const maxBlocksPerCycle = opts?.maxBlocksPerCycle ?? 100;
   const scanFn            = opts?.scanFn;
   const onEvent           = opts?.onEvent;
+  const onBlockConfirmed  = opts?.onBlockConfirmed;
   const storeGenericTxs   = opts?.storeGenericTxs ?? false;
 
   const syncedLogIntervalMs = 10 * 60_000;
@@ -200,7 +203,7 @@ export function startLiveIndexer(
 
         const result = scanFn
           ? await scanFn(db, client, fromBlock, toBlock)
-          : await scanBlockRange(db, client, fromBlock, toBlock, { onEvent, storeGenericTxs });
+          : await scanBlockRange(db, client, fromBlock, toBlock, { onEvent, onBlockConfirmed, storeGenericTxs });
 
         metrics.increment('blocksIndexedLive', blocksAhead);
         metrics.increment('eventsIndexedLive', result.eventsStored);

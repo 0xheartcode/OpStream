@@ -105,6 +105,12 @@ export interface ScanOptions {
    * full-archive copy of the chain.
    */
   storeGenericTxs?: boolean;
+  /**
+   * Called once per block after all events have been committed and dispatched.
+   * Receives the block number, all tx hashes in the block, and the block timestamp.
+   * Used to cross-link confirmed txids with the mempool poller.
+   */
+  onBlockConfirmed?: (params: { blockNumber: number; txHashes: string[]; blockTimestamp: number }) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -343,6 +349,7 @@ export async function scanBlockRange(
 ): Promise<ScanResult> {
   const minIntervalMs = opts?.minIntervalMs ?? 0;
   const onEvent = opts?.onEvent;
+  const onBlockConfirmed = opts?.onBlockConfirmed;
   const storeGenericTxs = opts?.storeGenericTxs ?? false;
   const startTime = Date.now();
   let lastCallTime = 0;
@@ -612,6 +619,14 @@ export async function scanBlockRange(
           eventRaw:        '0x' + e.rawData.toString('hex'),
         });
       }
+    }
+
+    if (onBlockConfirmed) {
+      onBlockConfirmed({
+        blockNumber,
+        txHashes:       txRows.map((t) => t.txHash),
+        blockTimestamp,
+      });
     }
 
     totalEvents += events.length;

@@ -246,6 +246,10 @@ async function main(): Promise<void> {
       const runIndexer = config.mode === 'indexer' || config.mode === 'full';
       const runMempool = config.mode === 'mempool' || config.mode === 'full';
 
+      const { WsSessionManager: WsSessionManagerSL } = await import('./indexer/wsSessionManager.js');
+      const wsManagerSL = new WsSessionManagerSL();
+      webhooks.setWsSessionManager(wsManagerSL);
+
       if (config.wsPort > 0) {
         webhooks.startBroadcastServer(config.wsPort);
         log('INFO', 'main', `WebSocket broadcast server on ws://localhost:${config.wsPort}`);
@@ -260,31 +264,45 @@ async function main(): Promise<void> {
 
       const stopPromises: Promise<void>[] = [];
 
+      // Start mempool poller first so indexer can call markConfirmed on it
+      let mempoolHandleSL: Awaited<ReturnType<typeof import('./indexer/mempoolPoller.js').startMempoolPoller>> | null = null;
+      if (runMempool) {
+        const { BitcoinRpcClient } = await import('./rpc/btcRpc.js');
+        const { startMempoolPoller } = await import('./indexer/mempoolPoller.js');
+        const btcRpc = new BitcoinRpcClient(config.bitcoinRpcUrl, config.bitcoinRpcUser, config.bitcoinRpcPass);
+        await btcRpc.connect();
+        mempoolHandleSL = startMempoolPoller(db, btcRpc, {
+          pollIntervalMs:   config.mempoolPollIntervalMs,
+          onMempoolEvent:   (event) => webhooks.dispatch(event),
+          onMempoolDropped: (event) => webhooks.dispatch(event),
+        });
+        stopPromises.push(
+          (mempoolHandleSL as typeof mempoolHandleSL & { _stopPromise: Promise<void> })._stopPromise,
+        );
+      }
+
       if (runIndexer) {
         const { OpnetRpcClient } = await import('./rpc/opnetRpc.js');
         const { startLiveIndexer } = await import('./indexer/liveIndexer.js');
         const client = new OpnetRpcClient(config.opnetRpcUrl);
         log('INFO', 'main', 'Starting live indexer...');
         const indexerHandle = startLiveIndexer(db, client, {
-          onEvent: (event) => webhooks.dispatch(event),
-          storeGenericTxs: config.storeGenericTxs,
+          onEvent:          (event) => webhooks.dispatch(event),
+          storeGenericTxs:  config.storeGenericTxs,
+          onBlockConfirmed: ({ blockNumber, txHashes, blockTimestamp }) => {
+            mempoolHandleSL?.markConfirmed(txHashes);
+            webhooks.dispatch({
+              blockNumber,
+              txHash:          '',
+              contractAddress: '',
+              eventName:       'NewBlock',
+              blockTimestamp,
+              failed:          false,
+            });
+          },
         });
         stopPromises.push(
           (indexerHandle as ReturnType<typeof startLiveIndexer> & { _stopPromise: Promise<void> })._stopPromise,
-        );
-      }
-
-      if (runMempool) {
-        const { BitcoinRpcClient } = await import('./rpc/btcRpc.js');
-        const { startMempoolPoller } = await import('./indexer/mempoolPoller.js');
-        const btcRpc = new BitcoinRpcClient(config.bitcoinRpcUrl, config.bitcoinRpcUser, config.bitcoinRpcPass);
-        await btcRpc.connect();
-        const mempoolHandle = startMempoolPoller(db, btcRpc, {
-          pollIntervalMs: config.mempoolPollIntervalMs,
-          onMempoolEvent: (event) => webhooks.dispatch(event),
-        });
-        stopPromises.push(
-          (mempoolHandle as ReturnType<typeof startMempoolPoller> & { _stopPromise: Promise<void> })._stopPromise,
         );
       }
 
@@ -363,6 +381,10 @@ async function main(): Promise<void> {
       const db = await openAdapter();
       const webhooks = getWebhookManager();
 
+      const { WsSessionManager } = await import('./indexer/wsSessionManager.js');
+      const wsManager = new WsSessionManager();
+      webhooks.setWsSessionManager(wsManager);
+
       if (config.wsPort > 0) {
         webhooks.startBroadcastServer(config.wsPort);
         log('INFO', 'main', `WebSocket broadcast server on ws://localhost:${config.wsPort}`);
@@ -384,6 +406,25 @@ async function main(): Promise<void> {
 
       const stopPromises: Promise<void>[] = [];
 
+      // Start mempool poller first so indexer can call markConfirmed on it
+      let mempoolHandleStart: Awaited<ReturnType<typeof import('./indexer/mempoolPoller.js').startMempoolPoller>> | null = null;
+      if (runMempool) {
+        const { BitcoinRpcClient } = await import('./rpc/btcRpc.js');
+        const { startMempoolPoller } = await import('./indexer/mempoolPoller.js');
+
+        const btcRpc = new BitcoinRpcClient(config.bitcoinRpcUrl, config.bitcoinRpcUser, config.bitcoinRpcPass);
+        await btcRpc.connect();
+
+        mempoolHandleStart = startMempoolPoller(db, btcRpc, {
+          pollIntervalMs:   config.mempoolPollIntervalMs,
+          onMempoolEvent:   (event) => webhooks.dispatch(event),
+          onMempoolDropped: (event) => webhooks.dispatch(event),
+        });
+        stopPromises.push(
+          (mempoolHandleStart as typeof mempoolHandleStart & { _stopPromise: Promise<void> })._stopPromise,
+        );
+      }
+
       // Start live indexer (confirmed blocks)
       if (runIndexer) {
         const { OpnetRpcClient } = await import('./rpc/opnetRpc.js');
@@ -392,28 +433,22 @@ async function main(): Promise<void> {
         const client = new OpnetRpcClient(config.opnetRpcUrl);
         log('INFO', 'main', 'Bootstrap complete — starting live indexer');
         const indexerHandle = startLiveIndexer(db, client, {
-          onEvent: (event) => webhooks.dispatch(event),
-          storeGenericTxs: config.storeGenericTxs,
+          onEvent:          (event) => webhooks.dispatch(event),
+          storeGenericTxs:  config.storeGenericTxs,
+          onBlockConfirmed: ({ blockNumber, txHashes, blockTimestamp }) => {
+            mempoolHandleStart?.markConfirmed(txHashes);
+            webhooks.dispatch({
+              blockNumber,
+              txHash:          '',
+              contractAddress: '',
+              eventName:       'NewBlock',
+              blockTimestamp,
+              failed:          false,
+            });
+          },
         });
         stopPromises.push(
           (indexerHandle as ReturnType<typeof startLiveIndexer> & { _stopPromise: Promise<void> })._stopPromise,
-        );
-      }
-
-      // Start mempool poller (pending OPNET txs)
-      if (runMempool) {
-        const { BitcoinRpcClient } = await import('./rpc/btcRpc.js');
-        const { startMempoolPoller } = await import('./indexer/mempoolPoller.js');
-
-        const btcRpc = new BitcoinRpcClient(config.bitcoinRpcUrl, config.bitcoinRpcUser, config.bitcoinRpcPass);
-        await btcRpc.connect();
-
-        const mempoolHandle = startMempoolPoller(db, btcRpc, {
-          pollIntervalMs: config.mempoolPollIntervalMs,
-          onMempoolEvent: (event) => webhooks.dispatch(event),
-        });
-        stopPromises.push(
-          (mempoolHandle as ReturnType<typeof startMempoolPoller> & { _stopPromise: Promise<void> })._stopPromise,
         );
       }
 
@@ -441,6 +476,10 @@ async function main(): Promise<void> {
       const db = await openAdapter();
       const webhooks = getWebhookManager();
 
+      const { WsSessionManager: WsSessionManagerLive } = await import('./indexer/wsSessionManager.js');
+      const wsManagerLive = new WsSessionManagerLive();
+      webhooks.setWsSessionManager(wsManagerLive);
+
       if (config.wsPort > 0) {
         webhooks.startBroadcastServer(config.wsPort);
         log('INFO', 'main', `WebSocket broadcast server on ws://localhost:${config.wsPort}`);
@@ -455,21 +494,8 @@ async function main(): Promise<void> {
 
       const stopPromises: Promise<void>[] = [];
 
-      if (runIndexer) {
-        const { OpnetRpcClient } = await import('./rpc/opnetRpc.js');
-        const { startLiveIndexer } = await import('./indexer/liveIndexer.js');
-
-        const client = new OpnetRpcClient(config.opnetRpcUrl);
-        log('INFO', 'main', 'Starting live indexer...', { dbPath: config.dbPath });
-        const indexerHandle = startLiveIndexer(db, client, {
-          onEvent: (event) => webhooks.dispatch(event),
-          storeGenericTxs: config.storeGenericTxs,
-        });
-        stopPromises.push(
-          (indexerHandle as ReturnType<typeof startLiveIndexer> & { _stopPromise: Promise<void> })._stopPromise,
-        );
-      }
-
+      // Start mempool poller first so indexer can call markConfirmed on it
+      let mempoolHandleLive: Awaited<ReturnType<typeof import('./indexer/mempoolPoller.js').startMempoolPoller>> | null = null;
       if (runMempool) {
         const { BitcoinRpcClient } = await import('./rpc/btcRpc.js');
         const { startMempoolPoller } = await import('./indexer/mempoolPoller.js');
@@ -477,12 +503,39 @@ async function main(): Promise<void> {
         const btcRpc = new BitcoinRpcClient(config.bitcoinRpcUrl, config.bitcoinRpcUser, config.bitcoinRpcPass);
         await btcRpc.connect();
 
-        const mempoolHandle = startMempoolPoller(db, btcRpc, {
-          pollIntervalMs: config.mempoolPollIntervalMs,
-          onMempoolEvent: (event) => webhooks.dispatch(event),
+        mempoolHandleLive = startMempoolPoller(db, btcRpc, {
+          pollIntervalMs:   config.mempoolPollIntervalMs,
+          onMempoolEvent:   (event) => webhooks.dispatch(event),
+          onMempoolDropped: (event) => webhooks.dispatch(event),
         });
         stopPromises.push(
-          (mempoolHandle as ReturnType<typeof startMempoolPoller> & { _stopPromise: Promise<void> })._stopPromise,
+          (mempoolHandleLive as typeof mempoolHandleLive & { _stopPromise: Promise<void> })._stopPromise,
+        );
+      }
+
+      if (runIndexer) {
+        const { OpnetRpcClient } = await import('./rpc/opnetRpc.js');
+        const { startLiveIndexer } = await import('./indexer/liveIndexer.js');
+
+        const client = new OpnetRpcClient(config.opnetRpcUrl);
+        log('INFO', 'main', 'Starting live indexer...', { dbPath: config.dbPath });
+        const indexerHandle = startLiveIndexer(db, client, {
+          onEvent:          (event) => webhooks.dispatch(event),
+          storeGenericTxs:  config.storeGenericTxs,
+          onBlockConfirmed: ({ blockNumber, txHashes, blockTimestamp }) => {
+            mempoolHandleLive?.markConfirmed(txHashes);
+            webhooks.dispatch({
+              blockNumber,
+              txHash:          '',
+              contractAddress: '',
+              eventName:       'NewBlock',
+              blockTimestamp,
+              failed:          false,
+            });
+          },
+        });
+        stopPromises.push(
+          (indexerHandle as ReturnType<typeof startLiveIndexer> & { _stopPromise: Promise<void> })._stopPromise,
         );
       }
 

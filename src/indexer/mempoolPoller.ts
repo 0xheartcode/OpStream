@@ -7,13 +7,22 @@
  *   - Blocking wrapper via runMempoolPoller()
  *
  * On each poll cycle:
- *   1. Fetch all mempool txids from Bitcoin Core
- *   2. Diff against an in-memory seen-set to find new txids
- *   3. Fetch raw tx hex for new txids (batched concurrently)
- *   4. Run btcTxParser to extract OPNET payload — discard non-OPNET txs
- *   5. Insert OPNET pending txs into mempool_pending table
- *   6. Dispatch webhook events for each new OPNET tx
- *   7. Prune the seen-set (2-hour TTL)
+ *   1. Fetch all current mempool txids from Bitcoin Core
+ *   2. Dropped detection — diff DB rows (confirmed_at IS NULL AND pruned_at IS NULL)
+ *      against the live mempool. Txids no longer present are marked pruned_at
+ *      and fire onMempoolDropped (→ MempoolDropped event to WebSocket subscribers).
+ *   3. Early-return if mempool is empty (after dropped detection runs)
+ *   4. Diff against an in-memory seen-set to find new txids
+ *   5. Fetch raw tx hex for new txids (batched concurrently, MAX_BATCH_SIZE = 50)
+ *   6. Run btcTxParser to extract OPNET payload — discard non-OPNET txs
+ *   7. Insert OPNET pending txs into mempool_pending table
+ *   8. Dispatch onMempoolEvent (→ MempoolPending event to WebSocket subscribers)
+ *   9. Prune the seen-set (2-hour TTL)
+ *
+ * Confirmed crosslink:
+ *   When the live indexer commits a block, main.ts calls handle.markConfirmed(txHashes).
+ *   This sets confirmed_at on matching mempool_pending rows so they are excluded from
+ *   future dropped-detection checks.
  *
  * The seen-set prevents re-fetching txids we've already processed.
  * On a chain with ~20 tokens, OPNET txs are a tiny fraction of the
@@ -83,6 +92,8 @@ export interface MempoolPollerOptions {
   pollIntervalMs?: number;
   /** Called for each new OPNET pending tx found in the mempool. */
   onMempoolEvent?: (event: WebhookEvent) => void;
+  /** Called when a pending tx is no longer visible in the mempool and is assumed dropped. */
+  onMempoolDropped?: (event: WebhookEvent) => void;
 }
 
 export interface MempoolPollerHealth {
@@ -96,13 +107,35 @@ export interface MempoolPollerHealth {
 export interface MempoolPollerHandle {
   stop(): void;
   health(): MempoolPollerHealth;
+  /**
+   * Mark txids as confirmed (sets confirmed_at in mempool_pending).
+   * Called by main.ts from the scanner's onBlockConfirmed callback.
+   * Fire-and-forget — errors are logged but not propagated.
+   */
+  markConfirmed(txids: string[]): void;
 }
 
 // ─── DB helpers ──────────────────────────────────────────────────────────────
 
+function unixNow(): number {
+  return Math.floor(Date.now() / 1000);
+}
+
 const INSERT_MEMPOOL_PENDING = `
   INSERT OR IGNORE INTO mempool_pending (txid, raw_payload_hex, contract_selector)
   VALUES (?, ?, ?)
+`;
+
+const SELECT_UNRESOLVED_PENDING = `
+  SELECT txid FROM mempool_pending WHERE confirmed_at IS NULL AND pruned_at IS NULL
+`;
+
+const UPDATE_PRUNED_AT = `
+  UPDATE mempool_pending SET pruned_at = ? WHERE txid = ? AND pruned_at IS NULL
+`;
+
+const UPDATE_CONFIRMED_AT = `
+  UPDATE mempool_pending SET confirmed_at = ? WHERE txid = ? AND confirmed_at IS NULL
 `;
 
 // ─── startMempoolPoller ──────────────────────────────────────────────────────
@@ -118,8 +151,9 @@ export function startMempoolPoller(
   btcRpc: BitcoinRpcClient,
   opts?: MempoolPollerOptions,
 ): MempoolPollerHandle {
-  const pollIntervalMs = opts?.pollIntervalMs ?? 10_000;
-  const onMempoolEvent = opts?.onMempoolEvent;
+  const pollIntervalMs   = opts?.pollIntervalMs ?? 10_000;
+  const onMempoolEvent   = opts?.onMempoolEvent;
+  const onMempoolDropped = opts?.onMempoolDropped;
 
   const seenSet = new SeenSet();
   let running = true;
@@ -138,12 +172,33 @@ export function startMempoolPoller(
     try {
       // 1. Get all mempool txids
       const allTxids = await btcRpc.getMempoolTxIds();
+
+      // 2. Dropped detection — diff current mempool against unresolved DB rows.
+      //    Runs even on empty mempool so txids that got evicted are not missed.
+      if (onMempoolDropped) {
+        const allTxSet = new Set(allTxids);
+        const pendingRows = await db.all<{ txid: string }>(SELECT_UNRESOLVED_PENDING);
+        const now = unixNow();
+        for (const row of pendingRows) {
+          if (!allTxSet.has(row.txid)) {
+            await db.run(UPDATE_PRUNED_AT, [now, row.txid]);
+            onMempoolDropped({
+              blockNumber:     -1,
+              txHash:          row.txid,
+              contractAddress: '',
+              eventName:       'MempoolDropped',
+              failed:          false,
+            });
+          }
+        }
+      }
+
       if (allTxids.length === 0) {
         log('DEBUG', 'mempool', 'Mempool empty or Bitcoin RPC not connected');
         return;
       }
 
-      // 2. Diff against seen-set
+      // 3. Diff against seen-set
       const newTxids = allTxids.filter(txid => !seenSet.has(txid));
 
       if (newTxids.length === 0) {
@@ -153,7 +208,7 @@ export function startMempoolPoller(
 
       log('DEBUG', 'mempool', 'New mempool txids', { newCount: newTxids.length, totalMempool: allTxids.length });
 
-      // 3. Fetch raw tx hex in batches
+      // 4. Fetch raw tx hex in batches
       let opnetFound = 0;
       for (let i = 0; i < newTxids.length; i += MAX_BATCH_SIZE) {
         if (!running) break;
@@ -178,11 +233,11 @@ export function startMempoolPoller(
 
           if (!rawHex) continue;
 
-          // 4. Extract OPNET payload
+          // 5. Extract OPNET payload
           const payload = extractOpnetPayload(rawHex);
           if (!payload) continue;
 
-          // 5. OPNET tx found — insert into DB
+          // 6. OPNET tx found — insert into DB
           opnetFound++;
           totalOpnetTxsSeen++;
           metrics.increment('mempoolOpnetTxsSeen');
@@ -200,7 +255,7 @@ export function startMempoolPoller(
             });
           }
 
-          // 6. Dispatch webhook event
+          // 7. Dispatch webhook event
           if (onMempoolEvent) {
             const event: WebhookEvent = {
               blockNumber:     -1, // sentinel: not yet in a block
@@ -214,7 +269,7 @@ export function startMempoolPoller(
         }
       }
 
-      // 7. Prune seen-set
+      // 8. Prune seen-set
       const pruned = seenSet.prune();
 
       if (opnetFound > 0 || pruned > 0) {
@@ -244,6 +299,13 @@ export function startMempoolPoller(
 
   log('INFO', 'mempool', 'Mempool poller started', { pollIntervalMs });
 
+  async function doMarkConfirmed(txids: string[]): Promise<void> {
+    const now = unixNow();
+    for (const txid of txids) {
+      await db.run(UPDATE_CONFIRMED_AT, [now, txid]);
+    }
+  }
+
   const handle: MempoolPollerHandle = {
     stop(): void {
       running = false;
@@ -267,6 +329,15 @@ export function startMempoolPoller(
         totalOpnetTxsSeen,
         totalTxsFetched,
       };
+    },
+
+    markConfirmed(txids: string[]): void {
+      if (txids.length === 0) return;
+      void doMarkConfirmed(txids).catch((err) => {
+        log('WARN', 'mempool', 'markConfirmed failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
     },
   };
 

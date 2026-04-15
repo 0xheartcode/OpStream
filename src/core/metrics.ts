@@ -1,7 +1,7 @@
 /**
  * Runtime metrics counters for OpStream (indexer/scanner infrastructure only).
  *
- * Bot-specific metrics (strategy-specific) remain in your-app.
+ * Bot-specific metrics (strategy-specific) belong in the consumer app.
  *
  * Usage:
  *   import { metrics } from './metrics.js';

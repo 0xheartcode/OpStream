@@ -31,7 +31,7 @@ const events = queryEvents(db, { contract: myContract, eventName: 'Swapped' });
 ## Architecture
 
 ```
-Layer 3:  Apps           (your-app, OpScope)
+Layer 3:  Apps           (your indexer app, OpScope)
 Layer 2:  op-index          Indexer framework — defineSchema, createIndexer, event handlers
 Layer 1:  OpStream       Self-hosted archival node — scans once, serves btc_* locally, raw event store
 Layer 0:  OPNET node     Live chain

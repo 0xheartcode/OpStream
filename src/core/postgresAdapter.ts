@@ -145,6 +145,18 @@ CREATE INDEX IF NOT EXISTS idx_contract_deployments_deployer ON contract_deploym
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tokens_alt_address  ON tokens(alt_address) WHERE alt_address IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_error_log_level         ON error_log(level);
 CREATE INDEX IF NOT EXISTS idx_error_log_created       ON error_log(created_at);
+
+CREATE TABLE IF NOT EXISTS mempool_pending (
+  txid              TEXT NOT NULL PRIMARY KEY,
+  raw_payload_hex   TEXT NOT NULL,
+  contract_selector TEXT,
+  first_seen_at     BIGINT NOT NULL DEFAULT extract(epoch from now())::bigint,
+  confirmed_at      BIGINT,
+  pruned_at         BIGINT
+);
+
+CREATE INDEX IF NOT EXISTS idx_mempool_pending_first_seen ON mempool_pending(first_seen_at);
+CREATE INDEX IF NOT EXISTS idx_mempool_pending_confirmed  ON mempool_pending(confirmed_at);
 `;
 
 // ---------------------------------------------------------------------------

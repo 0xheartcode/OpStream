@@ -149,7 +149,7 @@ const RESOLVED_ROW_TTL_S = 24 * 60 * 60; // 24 hours
 const PRUNE_RESOLVED = `
   DELETE FROM mempool_pending
   WHERE (confirmed_at IS NOT NULL OR pruned_at IS NOT NULL)
-    AND MAX(COALESCE(confirmed_at, 0), COALESCE(pruned_at, 0)) < ?
+    AND COALESCE(confirmed_at, pruned_at, 0) < ?
 `;
 
 // ─── startMempoolPoller ──────────────────────────────────────────────────────

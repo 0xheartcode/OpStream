@@ -18,6 +18,10 @@
  *   7. Insert OPNET pending txs into mempool_pending table
  *   8. Dispatch onMempoolEvent (→ MempoolPending event to WebSocket subscribers)
  *   9. Prune the seen-set (2-hour TTL)
+ *  10. Every 100 cycles (~17 min at default interval): TTL-prune resolved
+ *      mempool_pending rows older than 24h. Keeps the table tiny; confirmed txs
+ *      past the window are still resolvable via the transactions table
+ *      (opstream_getTransactionStatus two-step fallback).
  *
  * Confirmed crosslink:
  *   When the live indexer commits a block, main.ts calls handle.markConfirmed(txHashes).
@@ -138,6 +142,16 @@ const UPDATE_CONFIRMED_AT = `
   UPDATE mempool_pending SET confirmed_at = ? WHERE txid = ? AND confirmed_at IS NULL
 `;
 
+// Prune resolved rows older than this — keeps the table tiny while still
+// allowing opstream_getTransactionStatus to answer within the window.
+const RESOLVED_ROW_TTL_S = 24 * 60 * 60; // 24 hours
+
+const PRUNE_RESOLVED = `
+  DELETE FROM mempool_pending
+  WHERE (confirmed_at IS NOT NULL OR pruned_at IS NOT NULL)
+    AND MAX(COALESCE(confirmed_at, 0), COALESCE(pruned_at, 0)) < ?
+`;
+
 // ─── startMempoolPoller ──────────────────────────────────────────────────────
 
 /**
@@ -161,6 +175,7 @@ export function startMempoolPoller(
   let totalOpnetTxsSeen = 0;
   let totalTxsFetched = 0;
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let pollCount = 0;
 
   let _resolveStop: (() => void) | null = null;
   const stopPromise = new Promise<void>((resolve) => { _resolveStop = resolve; });
@@ -271,6 +286,14 @@ export function startMempoolPoller(
 
       // 8. Prune seen-set
       const pruned = seenSet.prune();
+
+      // 9. TTL-prune resolved mempool_pending rows (~every 100 cycles ≈ 17 min at 10s interval)
+      pollCount++;
+      if (pollCount % 100 === 0) {
+        const cutoff = unixNow() - RESOLVED_ROW_TTL_S;
+        await db.run(PRUNE_RESOLVED, [cutoff]);
+        log('DEBUG', 'mempool', 'Pruned resolved mempool_pending rows older than 24h');
+      }
 
       if (opnetFound > 0 || pruned > 0) {
         log('INFO', 'mempool', 'Poll cycle complete', {

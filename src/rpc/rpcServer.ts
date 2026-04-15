@@ -51,6 +51,12 @@
  *                  opstream_getBlockReceipts       every tx + events for a block
  *                  opstream_getTransaction         tx metadata + events by hash
  *                  opstream_getTransactionReceipt  rich receipt with tx metadata
+ *                  opstream_getTransactionStatus   tx lifecycle poll (pending/confirmed/dropped/unknown)
+ *                                                  — HTTP complement to the WS txStatus subscription.
+ *                                                  Resolution order:
+ *                                                    1. mempool_pending table (fast path, 24h TTL)
+ *                                                    2. transactions table (permanent fallback)
+ *                                                    3. "unknown" (never seen by this node)
  *                  opstream_getCodeHash            bytecode hash from contract_deployments
  *
  * Blocks rows scanned before the archival schema additions have NULL for
@@ -1047,6 +1053,108 @@ interface ReceiptTxRow {
   receipt_proofs:   string | null;  // JSON text
 }
 
+// ── opstream_getTransactionStatus ────────────────────────────────────────────
+//
+// Stateless HTTP poll for tx lifecycle — the CLI / serverless complement to the
+// WS txStatus subscription. Resolution order:
+//   1. mempool_pending  (fast path — covers pending, confirmed, dropped within TTL)
+//   2. transactions     (permanent fallback — confirmed txs after mempool_pending pruned)
+//   3. unknown          (never seen by this node)
+//
+// Response shape:
+//   { txid, status: "pending"|"confirmed"|"dropped"|"unknown",
+//     blockNumber: number|null, confirmedAt: number|null, prunedAt: number|null }
+
+interface MempoolPendingRow {
+  txid:         string;
+  confirmed_at: number | null;
+  pruned_at:    number | null;
+}
+
+interface ConfirmedTxRow {
+  tx_hash:      string;
+  block_number: number;
+}
+
+async function handleGetTransactionStatus(
+  id: string | number | null | undefined,
+  params: unknown,
+  db: DbAdapter,
+): Promise<JsonRpcResponse> {
+  if (!Array.isArray(params) || typeof params[0] !== 'string' || params[0].length === 0) {
+    return fail(id, { ...INVALID_PARAMS, message: 'params[0] must be a non-empty txid string' });
+  }
+  const txid = params[0];
+
+  try {
+    // 1. Check mempool_pending — covers all lifecycle states within the retention window
+    const pending = await db.get<MempoolPendingRow>(
+      `SELECT txid, confirmed_at, pruned_at FROM mempool_pending WHERE txid = ?`,
+      [txid],
+    );
+
+    if (pending) {
+      if (pending.confirmed_at !== null) {
+        // Confirmed via crosslink — look up block number from transactions table
+        const txRow = await db.get<ConfirmedTxRow>(
+          `SELECT tx_hash, block_number FROM transactions WHERE tx_hash = ?`,
+          [txid],
+        );
+        return ok(id, {
+          txid,
+          status:      'confirmed',
+          blockNumber: txRow?.block_number ?? null,
+          confirmedAt: pending.confirmed_at,
+          prunedAt:    null,
+        });
+      }
+      if (pending.pruned_at !== null) {
+        return ok(id, {
+          txid,
+          status:      'dropped',
+          blockNumber: null,
+          confirmedAt: null,
+          prunedAt:    pending.pruned_at,
+        });
+      }
+      return ok(id, {
+        txid,
+        status:      'pending',
+        blockNumber: null,
+        confirmedAt: null,
+        prunedAt:    null,
+      });
+    }
+
+    // 2. mempool_pending row pruned (past TTL) — fall back to transactions table
+    const txRow = await db.get<ConfirmedTxRow>(
+      `SELECT tx_hash, block_number FROM transactions WHERE tx_hash = ?`,
+      [txid],
+    );
+    if (txRow) {
+      return ok(id, {
+        txid,
+        status:      'confirmed',
+        blockNumber: txRow.block_number,
+        confirmedAt: null,   // pruned from mempool_pending; exact timestamp unavailable
+        prunedAt:    null,
+      });
+    }
+
+    // 3. Never seen
+    return ok(id, {
+      txid,
+      status:      'unknown',
+      blockNumber: null,
+      confirmedAt: null,
+      prunedAt:    null,
+    });
+
+  } catch (e) {
+    return fail(id, { ...INTERNAL_ERROR, message: `Internal error: ${String(e)}` });
+  }
+}
+
 async function handleBtcGetTransactionReceipt(
   id: string | number | null | undefined,
   params: unknown,
@@ -1165,6 +1273,7 @@ async function handleSingle(
     case 'opstream_getBlockRange':         return handleGetBlockRange(id, params, db);
     case 'opstream_getTransaction':        return handleGetTransaction(id, params, db);
     case 'opstream_getTransactionReceipt': return handleGetTransactionReceipt(id, params, db);
+    case 'opstream_getTransactionStatus':  return handleGetTransactionStatus(id, params, db);
     case 'opstream_getCodeHash':           return handleGetCodeHash(id, params, db);
   }
 

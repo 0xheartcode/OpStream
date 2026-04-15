@@ -999,6 +999,107 @@ describe('btc_getTransactionReceipt (archival)', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// opstream_getTransactionStatus
+// ---------------------------------------------------------------------------
+
+describe('opstream_getTransactionStatus', () => {
+  let url: string;
+  let close: () => Promise<void>;
+  let db: DbAdapter;
+
+  // Seed a mempool_pending table with one row in each lifecycle state:
+  //   txPending   — confirmed_at NULL, pruned_at NULL (still in mempool)
+  //   txConfirmed — confirmed_at set (crosslinked by block scanner)
+  //   txDropped   — pruned_at set (evicted from mempool)
+  // Also seed the transactions table with txConfirmed so the block-number
+  // fallback path can resolve it.
+  beforeAll(async () => {
+    db = await createTestDb();
+
+    await db.run(`
+      INSERT INTO mempool_pending (txid, raw_payload_hex, contract_selector, confirmed_at, pruned_at)
+      VALUES
+        ('txPending',   'deadbeef', NULL, NULL,       NULL),
+        ('txConfirmed', 'deadbeef', NULL, 1700000001, NULL),
+        ('txDropped',   'deadbeef', NULL, NULL,       1700000002)
+    `);
+
+    // Insert a matching transactions row so block_number resolution works
+    await db.run(`
+      INSERT INTO transactions (tx_hash, block_number, tx_index, tx_type)
+      VALUES ('txConfirmed', 42, 0, 'INTERACTION')
+    `);
+
+    ({ url, close } = await startTestServer(db));
+  });
+
+  afterAll(async () => { await close(); });
+
+  it('returns status=pending for an unresolved mempool tx', async () => {
+    const { body } = await rpc(url, 'opstream_getTransactionStatus', ['txPending']);
+    expect(body.result.txid).toBe('txPending');
+    expect(body.result.status).toBe('pending');
+    expect(body.result.blockNumber).toBeNull();
+    expect(body.result.confirmedAt).toBeNull();
+    expect(body.result.prunedAt).toBeNull();
+  });
+
+  it('returns status=confirmed with blockNumber when crosslinked', async () => {
+    const { body } = await rpc(url, 'opstream_getTransactionStatus', ['txConfirmed']);
+    expect(body.result.status).toBe('confirmed');
+    expect(body.result.blockNumber).toBe(42);
+    expect(body.result.confirmedAt).toBe(1700000001);
+    expect(body.result.prunedAt).toBeNull();
+  });
+
+  it('returns status=dropped for an evicted mempool tx', async () => {
+    const { body } = await rpc(url, 'opstream_getTransactionStatus', ['txDropped']);
+    expect(body.result.status).toBe('dropped');
+    expect(body.result.prunedAt).toBe(1700000002);
+    expect(body.result.blockNumber).toBeNull();
+    expect(body.result.confirmedAt).toBeNull();
+  });
+
+  it('returns status=confirmed via transactions table when mempool_pending row is gone', async () => {
+    // Simulate post-TTL pruning: insert directly into transactions, no mempool_pending row
+    await db.run(`
+      INSERT INTO transactions (tx_hash, block_number, tx_index, tx_type)
+      VALUES ('txOldConfirmed', 99, 0, 'INTERACTION')
+    `);
+    const { body } = await rpc(url, 'opstream_getTransactionStatus', ['txOldConfirmed']);
+    expect(body.result.status).toBe('confirmed');
+    expect(body.result.blockNumber).toBe(99);
+    expect(body.result.confirmedAt).toBeNull(); // no mempool row — timestamp unavailable
+  });
+
+  it('returns status=unknown for a txid never seen', async () => {
+    const { body } = await rpc(url, 'opstream_getTransactionStatus', ['txNeverSeen']);
+    expect(body.result.status).toBe('unknown');
+    expect(body.result.blockNumber).toBeNull();
+    expect(body.result.confirmedAt).toBeNull();
+    expect(body.result.prunedAt).toBeNull();
+  });
+
+  it('returns error on missing params', async () => {
+    const { body } = await rpc(url, 'opstream_getTransactionStatus');
+    expect(body.error).toBeDefined();
+    expect(body.error.code).toBe(-32602);
+  });
+
+  it('returns error on empty string txid', async () => {
+    const { body } = await rpc(url, 'opstream_getTransactionStatus', ['']);
+    expect(body.error).toBeDefined();
+    expect(body.error.code).toBe(-32602);
+  });
+
+  it('returns error on non-string param', async () => {
+    const { body } = await rpc(url, 'opstream_getTransactionStatus', [12345]);
+    expect(body.error).toBeDefined();
+    expect(body.error.code).toBe(-32602);
+  });
+});
+
 describe('startRpcServer / stopRpcServer lifecycle', () => {
   afterEach(() => {
     stopRpcServer();

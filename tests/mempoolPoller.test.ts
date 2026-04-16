@@ -150,12 +150,15 @@ describe('mempoolPoller', () => {
     handle.stop();
 
     // Check DB
-    const rows = await db.all<{ txid: string; contract_selector: string | null }>(
-      'SELECT txid, contract_selector FROM mempool_pending',
+    const rows = await db.all<{ txid: string; contract_selector: string | null; vsize_bytes: number | null }>(
+      'SELECT txid, contract_selector, vsize_bytes FROM mempool_pending',
     );
     expect(rows.length).toBe(1);
     expect(rows[0]!.txid).toBe('txid_opnet_1');
     expect(rows[0]!.contract_selector).toBe('0xdeadbeef');
+    // vsize_bytes must be stored and be a positive integer
+    expect(rows[0]!.vsize_bytes).not.toBeNull();
+    expect(rows[0]!.vsize_bytes).toBeGreaterThan(0);
 
     // Check webhook event dispatched
     expect(events.length).toBe(1);
@@ -247,6 +250,9 @@ describe('mempoolPoller', () => {
     const rows = await db.all('SELECT * FROM mempool_pending');
     expect(rows.length).toBe(1);
     // Original data preserved (not overwritten)
-    expect((rows[0] as { raw_payload_hex: string }).raw_payload_hex).toBe('existing');
+    const row = rows[0] as { raw_payload_hex: string; vsize_bytes: number | null };
+    expect(row.raw_payload_hex).toBe('existing');
+    // Manual insert had no vsize_bytes — column is nullable, so NULL is correct here
+    expect(row.vsize_bytes).toBeNull();
   });
 });

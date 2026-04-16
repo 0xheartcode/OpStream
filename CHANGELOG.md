@@ -10,6 +10,10 @@ Versioning:
 
 ---
 
+## [0.1.3] - 2026-04-16
+- release: fix release workflow + lint fix (#7)
+
+
 ## [0.1.2] - 2026-04-16
 - fix(lint): remove constant condition in reset.test.ts (#5)
 

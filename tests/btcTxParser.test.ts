@@ -276,3 +276,81 @@ describe('extractOpnetPayload', () => {
     expect(result!.payloadHex).toBe('aabb');
   });
 });
+
+// ─── vsizeBytes ───────────────────────────────────────────────────────────────
+
+describe('extractOpnetPayload — vsizeBytes', () => {
+  /**
+   * Our buildTaprootTx helper always produces:
+   *   stripped_size = version(4) + vinCount(1) + input(41) + voutCount(1) + output(43) + locktime(4) = 94
+   *   witness_bytes = total_bytes − 2 (marker+flag) − stripped_size
+   *   weight        = 94 × 4 + 2 + witness_bytes = 378 + (total_bytes − 96) = 282 + total_bytes
+   *   vsize         = ceil((282 + total_bytes) / 4)
+   */
+  function expectedVsize(rawHex: string): number {
+    const totalBytes = rawHex.length / 2;
+    return Math.ceil((282 + totalBytes) / 4);
+  }
+
+  it('returns a positive integer vsizeBytes', () => {
+    const calldata = Buffer.from('deadbeef01020304', 'hex');
+    const compressed = gzipSync(calldata, { level: 9 });
+    const tapscript = buildOpnetTapscript([compressed]);
+    const rawHex = buildTaprootTx(tapscript);
+
+    const result = extractOpnetPayload(rawHex);
+    expect(result).not.toBeNull();
+    expect(result!.vsizeBytes).toBeGreaterThan(0);
+    expect(Number.isInteger(result!.vsizeBytes)).toBe(true);
+  });
+
+  it('computes correct vsize for a known tx structure', () => {
+    const calldata = Buffer.from('deadbeef01020304aabbccdd', 'hex');
+    const compressed = gzipSync(calldata, { level: 9 });
+    const tapscript = buildOpnetTapscript([compressed]);
+    const rawHex = buildTaprootTx(tapscript);
+
+    const result = extractOpnetPayload(rawHex);
+    expect(result).not.toBeNull();
+    expect(result!.vsizeBytes).toBe(expectedVsize(rawHex));
+  });
+
+  it('vsize grows with larger calldata', () => {
+    // Use pseudo-random bytes so gzip cannot compress them down to the same
+    // tiny overhead — guarantees the large tx is measurably bigger.
+    const small = Buffer.from(Array.from({ length: 20 }, (_, i) => (i * 37 + 17) % 256));
+    const large = Buffer.from(Array.from({ length: 2000 }, (_, i) => (i * 97 + 53) % 256));
+
+    const mkHex = (cd: Buffer): string => {
+      const compressed = gzipSync(cd, { level: 9 });
+      // split into ≤512-byte chunks
+      const chunks: Buffer[] = [];
+      for (let i = 0; i < compressed.length; i += 512) chunks.push(compressed.subarray(i, i + 512));
+      return buildTaprootTx(buildOpnetTapscript(chunks));
+    };
+
+    const smallHex = mkHex(small);
+    const largeHex = mkHex(large);
+
+    const smallResult = extractOpnetPayload(smallHex);
+    const largeResult = extractOpnetPayload(largeHex);
+
+    expect(smallResult).not.toBeNull();
+    expect(largeResult).not.toBeNull();
+    // Sanity: larger raw tx must produce larger vsize
+    expect(largeHex.length).toBeGreaterThan(smallHex.length);
+    expect(largeResult!.vsizeBytes).toBeGreaterThan(smallResult!.vsizeBytes);
+  });
+
+  it('vsize is consistent across the decompression-fallback path', () => {
+    // Push raw uncompressed bytes — decompression will fail, fallback path runs
+    const rawBytes = Buffer.from('aabbccdd11223344', 'hex');
+    const tapscript = buildOpnetTapscript([rawBytes]);
+    const rawHex = buildTaprootTx(tapscript);
+
+    const result = extractOpnetPayload(rawHex);
+    expect(result).not.toBeNull();
+    // vsizeBytes must still be present and correct on the fallback path
+    expect(result!.vsizeBytes).toBe(expectedVsize(rawHex));
+  });
+});

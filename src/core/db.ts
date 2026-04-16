@@ -172,12 +172,13 @@ CREATE INDEX IF NOT EXISTS idx_error_log_level   ON error_log(level);
 CREATE INDEX IF NOT EXISTS idx_error_log_created ON error_log(created_at);
 
 CREATE TABLE IF NOT EXISTS mempool_pending (
-  txid             TEXT NOT NULL PRIMARY KEY,
-  raw_payload_hex  TEXT NOT NULL,
+  txid              TEXT NOT NULL PRIMARY KEY,
+  raw_payload_hex   TEXT NOT NULL,
   contract_selector TEXT,
-  first_seen_at    INTEGER NOT NULL DEFAULT (unixepoch()),
-  confirmed_at     INTEGER,
-  pruned_at        INTEGER
+  vsize_bytes       INTEGER,
+  first_seen_at     INTEGER NOT NULL DEFAULT (unixepoch()),
+  confirmed_at      INTEGER,
+  pruned_at         INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_mempool_pending_first_seen ON mempool_pending(first_seen_at);
@@ -423,6 +424,10 @@ function runMigrations(db: Database.Database): void {
       applied.push('events.decoded_json dropped (decoding moved to op-index)');
     }
     const mempoolColsCheck = db.prepare('PRAGMA table_info(mempool_pending)').all() as Array<{ name: string }>;
+    if (!mempoolColsCheck.some(c => c.name === 'vsize_bytes')) {
+      db.exec(`ALTER TABLE mempool_pending ADD COLUMN vsize_bytes INTEGER`);
+      applied.push('mempool_pending.vsize_bytes added');
+    }
     if (mempoolColsCheck.some(c => c.name === 'decoded_json')) {
       db.exec(`ALTER TABLE mempool_pending DROP COLUMN decoded_json`);
       applied.push('mempool_pending.decoded_json dropped (decoding moved to op-index)');

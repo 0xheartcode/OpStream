@@ -45,6 +45,12 @@ export interface OpnetPayload {
   selectorHex: string | null;
   /** Compressed calldata chunks concatenated, before decompression. Hex-encoded. */
   compressedHex: string;
+  /**
+   * Virtual size of the Bitcoin transaction in vbytes.
+   * vsize = ceil(weight / 4) where weight = stripped_size × 4 + witness_bytes.
+   * Enables priority_fee / vsize as a normalised ordering signal per unit of block space.
+   */
+  vsizeBytes: number;
 }
 
 // ─── Bitcoin script opcodes ──────────────────────────────────────────────────
@@ -238,13 +244,17 @@ function extractCalldataFromScript(script: Buffer): Buffer | null {
 // ─── Bitcoin wire format parser ──────────────────────────────────────────────
 
 /**
- * Parse a raw Bitcoin transaction (hex-encoded) and extract witness stacks.
- * Returns an array of witness stacks (one per input), where each witness stack
- * is an array of Buffer elements.
+ * Parse a raw Bitcoin transaction (hex-encoded) and extract witness stacks
+ * together with the transaction's virtual size (vsize).
+ *
+ * vsize = ceil(weight / 4)
+ * weight = stripped_size × 4 + witness_bytes
+ *   stripped_size = total bytes − 2 (marker+flag) − witness_bytes
+ *   witness_bytes = bytes between end-of-outputs and start-of-locktime
  *
  * Returns null if the transaction is not segwit (no witness data).
  */
-function parseWitnessStacks(rawHex: string): Buffer[][] | null {
+function parseWitnessStacks(rawHex: string): { witnesses: Buffer[][]; vsizeBytes: number } | null {
   const buf = Buffer.from(rawHex, 'hex');
   const c = new BufferCursor(buf);
 
@@ -277,6 +287,9 @@ function parseWitnessStacks(rawHex: string): Buffer[][] | null {
     c.skip(scriptLen); // scriptPubKey
   }
 
+  // Record cursor position immediately before witness data
+  const posBeforeWitness = c.pos;
+
   // Witness data — one stack per input
   const witnesses: Buffer[][] = [];
   for (let i = 0; i < vinCount; i++) {
@@ -289,8 +302,20 @@ function parseWitnessStacks(rawHex: string): Buffer[][] | null {
     witnesses.push(stack);
   }
 
-  // locktime (4 bytes) — skip
-  return witnesses;
+  // Record cursor position immediately after witness data (locktime follows)
+  const posAfterWitness = c.pos;
+
+  // Compute vsize:
+  //   witness_bytes  = bytes occupied by all witness stacks
+  //   stripped_size  = total − 2 (marker+flag) − witness_bytes
+  //   weight         = stripped_size × 4 + 2 + witness_bytes
+  //   vsize          = ceil(weight / 4)
+  const witnessBytes  = posAfterWitness - posBeforeWitness;
+  const strippedSize  = buf.length - 2 - witnessBytes;
+  const weight        = strippedSize * 4 + 2 + witnessBytes;
+  const vsizeBytes    = Math.ceil(weight / 4);
+
+  return { witnesses, vsizeBytes };
 }
 
 /**
@@ -336,14 +361,16 @@ function getTapscript(stack: Buffer[]): Buffer {
  * to at least detect the OPNET transaction.
  */
 export function extractOpnetPayload(rawTxHex: string): OpnetPayload | null {
-  let witnesses: Buffer[][] | null;
+  let parsed: { witnesses: Buffer[][]; vsizeBytes: number } | null;
   try {
-    witnesses = parseWitnessStacks(rawTxHex);
+    parsed = parseWitnessStacks(rawTxHex);
   } catch {
     return null; // Malformed tx
   }
 
-  if (!witnesses) return null;
+  if (!parsed) return null;
+
+  const { witnesses, vsizeBytes } = parsed;
 
   for (const stack of witnesses) {
     if (!isTaprootScriptPath(stack)) continue;
@@ -366,6 +393,7 @@ export function extractOpnetPayload(rawTxHex: string): OpnetPayload | null {
           ? '0x' + compressed.subarray(0, 4).toString('hex')
           : null,
         compressedHex,
+        vsizeBytes,
       };
     }
 
@@ -374,7 +402,7 @@ export function extractOpnetPayload(rawTxHex: string): OpnetPayload | null {
       ? '0x' + decompressed.subarray(0, 4).toString('hex')
       : null;
 
-    return { payloadHex, selectorHex, compressedHex };
+    return { payloadHex, selectorHex, compressedHex, vsizeBytes };
   }
 
   return null;

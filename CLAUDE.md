@@ -4,17 +4,18 @@
 
 MUST follow for all code changes:
 
-1. **Always branch from `main`** before making changes:
+1. **Always branch from `dev`** before making changes:
    - `feat/...` — new feature (small or large)
    - `fix/...` — bug fix
    - `chore/...` — tooling, deps, docs, config
    - `refactor/...` — internal restructure with no behaviour change
 2. **Make focused commits** on the branch. Multiple commits per branch is fine and encouraged.
-3. **Open a PR** using the PR template. Always add one semver label:
+3. **Open a PR targeting `dev`** using the PR template. Always add one semver label:
    - `semver:major` — breaking change or major milestone (bumps X.y.z)
    - `semver:minor` — meaningful improvement or significant new capability (bumps x.Y.z)
    - `semver:patch` — small feature, small fix, chore, refactor, docs (bumps x.y.Z)
-4. **Never commit directly to `main`** unless the user explicitly says so in the message.
+4. **`dev → main` is the release PR** — Railway deploys from `main`. Only merge `dev → main` when ready to ship.
+5. **Never commit directly to `main` or `dev`** unless the user explicitly says so.
 
 Semver guide for this project:
 - **Z (patch)** — the default. Small features, small fixes, docs, chores, any general commit.

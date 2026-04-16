@@ -288,40 +288,40 @@ describe('opstream_getLogs', () => {
 
   it('no filter returns all 4 events', async () => {
     const { body } = await rpc(url, 'opstream_getLogs', [{}]);
-    expect(body.result).toHaveLength(4);
+    expect(body.result.items).toHaveLength(4);
   });
 
   it('filter by address', async () => {
     const { body } = await rpc(url, 'opstream_getLogs', [{ address: 'bc1qa' }]);
-    expect(body.result).toHaveLength(2);
-    for (const log of body.result) {
+    expect(body.result.items).toHaveLength(2);
+    for (const log of body.result.items) {
       expect(log.address).toBe('bc1qa');
     }
   });
 
   it('filter by eventName', async () => {
     const { body } = await rpc(url, 'opstream_getLogs', [{ eventName: 'Swap' }]);
-    expect(body.result).toHaveLength(2);
-    for (const log of body.result) {
+    expect(body.result.items).toHaveLength(2);
+    for (const log of body.result.items) {
       expect(log.topics[0]).toBe('Swap');
     }
   });
 
   it('filter by fromBlock + toBlock', async () => {
     const { body } = await rpc(url, 'opstream_getLogs', [{ fromBlock: 100, toBlock: 200 }]);
-    expect(body.result).toHaveLength(3);
+    expect(body.result.items).toHaveLength(3);
   });
 
   it('filter by combined address + eventName', async () => {
     const { body } = await rpc(url, 'opstream_getLogs', [{ address: 'bc1qa', eventName: 'Swap' }]);
-    expect(body.result).toHaveLength(1);
-    expect(body.result[0].address).toBe('bc1qa');
-    expect(body.result[0].topics[0]).toBe('Swap');
+    expect(body.result.items).toHaveLength(1);
+    expect(body.result.items[0].address).toBe('bc1qa');
+    expect(body.result.items[0].topics[0]).toBe('Swap');
   });
 
   it('returned log has correct shape', async () => {
     const { body } = await rpc(url, 'opstream_getLogs', [{ address: 'bc1qa', eventName: 'Swap' }]);
-    const log = body.result[0];
+    const log = body.result.items[0];
     expect(typeof log.address).toBe('string');
     expect(Array.isArray(log.topics)).toBe(true);
     expect(typeof log.data).toBe('string');
@@ -333,14 +333,14 @@ describe('opstream_getLogs', () => {
   it('"latest" resolves to checkpoint block', async () => {
     const { body } = await rpc(url, 'opstream_getLogs', [{ fromBlock: 'latest', toBlock: 'latest' }]);
     // No events at block 500, result should be empty (not an error)
-    expect(Array.isArray(body.result)).toBe(true);
+    expect(Array.isArray(body.result.items)).toBe(true);
     expect(body.error).toBeUndefined();
   });
 
   it('hex fromBlock string is parsed correctly', async () => {
     // 0x64 = 100
     const { body } = await rpc(url, 'opstream_getLogs', [{ fromBlock: '0x64', toBlock: '0x64' }]);
-    expect(body.result).toHaveLength(2); // two events at block 100
+    expect(body.result.items).toHaveLength(2); // two events at block 100
   });
 
   it('missing params → -32602', async () => {
@@ -394,17 +394,17 @@ describe('opstream_getBlockReceipts', () => {
 
   it('transactions are ordered by tx_index', async () => {
     const { body } = await rpc(url, 'opstream_getBlockReceipts', [941400]);
-    const txs = body.result.transactions as Array<{ tx_hash: string }>;
-    expect(txs[0]!.tx_hash).toBe('txA');
-    expect(txs[1]!.tx_hash).toBe('txB');
+    const txs = body.result.transactions as Array<{ hash: string }>;
+    expect(txs[0]!.hash).toBe('txA');
+    expect(txs[1]!.hash).toBe('txB');
   });
 
   it('events nested under correct transaction', async () => {
     const { body } = await rpc(url, 'opstream_getBlockReceipts', [941400]);
-    const txA = (body.result.transactions as Array<{ tx_hash: string; events: unknown[] }>)
-      .find((t) => t.tx_hash === 'txA')!;
+    const txA = (body.result.transactions as Array<{ hash: string; events: Array<{ type: string }> }>)
+      .find((t) => t.hash === 'txA')!;
     expect(txA.events).toHaveLength(1);
-    expect((txA.events[0] as { topics: string[] }).topics[0]).toBe('Swap');
+    expect(txA.events[0]!.type).toBe('Swap');
   });
 
   it('"latest" resolves via checkpoint', async () => {
@@ -443,15 +443,15 @@ describe('opstream_getTransaction', () => {
 
   it('known hash returns tx fields', async () => {
     const { body } = await rpc(url, 'opstream_getTransaction', ['txKnown']);
-    expect(body.result.tx_hash).toBe('txKnown');
-    expect(body.result.block_number).toBe(100);
-    expect(typeof body.result.failed).toBe('boolean');
+    expect(body.result.hash).toBe('txKnown');
+    expect(parseInt(body.result.blockNumber as string, 16)).toBe(100);
+    expect(typeof body.result.OPNetType).toBe('string');
   });
 
   it('associated events are included', async () => {
     const { body } = await rpc(url, 'opstream_getTransaction', ['txKnown']);
     expect(body.result.events).toHaveLength(1);
-    expect(body.result.events[0].topics[0]).toBe('Mint');
+    expect(body.result.events[0].type).toBe('Mint');
   });
 
   it('missing params → -32602', async () => {
@@ -637,11 +637,11 @@ describe('opstream_getBlockByNumber', () => {
 
   it('full form (includeTx=true) returns RpcTransaction objects with events', async () => {
     const { body } = await rpc(url, 'opstream_getBlockByNumber', [941500, true]);
-    const txs = body.result.transactions as Array<{ tx_hash: string; events: unknown[] }>;
+    const txs = body.result.transactions as Array<{ hash: string; events: unknown[] }>;
     expect(txs).toHaveLength(2);
-    expect(txs[0]!.tx_hash).toBe('txBN_A');
+    expect(txs[0]!.hash).toBe('txBN_A');
     expect(txs[0]!.events).toHaveLength(1);
-    expect(txs[1]!.tx_hash).toBe('txBN_B');
+    expect(txs[1]!.hash).toBe('txBN_B');
     expect(txs[1]!.events).toHaveLength(0);
   });
 
@@ -691,8 +691,8 @@ describe('opstream_getBlockByHash', () => {
 
   it('includeTx=true expands transactions', async () => {
     const { body } = await rpc(url, 'opstream_getBlockByHash', ['blockhash_941600', true]);
-    const txs = body.result.transactions as Array<{ tx_hash: string }>;
-    expect(txs[0]!.tx_hash).toBe('txBH_A');
+    const txs = body.result.transactions as Array<{ hash: string }>;
+    expect(txs[0]!.hash).toBe('txBH_A');
   });
 
   it('non-string param → -32602', async () => {
@@ -731,16 +731,16 @@ describe('opstream_getTransactionReceipt', () => {
 
   it('successful tx receipt includes events and failed=false', async () => {
     const { body } = await rpc(url, 'opstream_getTransactionReceipt', ['txRcpt']);
-    expect(body.result.tx_hash).toBe('txRcpt');
-    expect(body.result.failed).toBe(false);
+    expect(body.result.hash).toBe('txRcpt');
+    expect(body.result.revert).toBeUndefined(); // no revert field = not failed
     expect(body.result.events).toHaveLength(1);
-    expect(body.result.events[0].topics[0]).toBe('Transfer');
+    expect(body.result.events[0].type).toBe('Transfer');
   });
 
-  it('failed tx surfaces failed=true + revert_reason', async () => {
+  it('failed tx surfaces revert reason', async () => {
     const { body } = await rpc(url, 'opstream_getTransactionReceipt', ['txFail']);
-    expect(body.result.failed).toBe(true);
-    expect(body.result.revert_reason).toBe('out of gas');
+    expect(typeof body.result.revert).toBe('string');
+    expect(body.result.revert).toBe('out of gas');
   });
 
   it('missing params → -32602', async () => {

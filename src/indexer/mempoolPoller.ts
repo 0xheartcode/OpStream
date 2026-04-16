@@ -126,8 +126,8 @@ function unixNow(): number {
 }
 
 const INSERT_MEMPOOL_PENDING = `
-  INSERT OR IGNORE INTO mempool_pending (txid, raw_payload_hex, contract_selector)
-  VALUES (?, ?, ?)
+  INSERT OR IGNORE INTO mempool_pending (txid, raw_payload_hex, contract_selector, vsize_bytes)
+  VALUES (?, ?, ?, ?)
 `;
 
 const SELECT_UNRESOLVED_PENDING = `
@@ -262,6 +262,7 @@ export function startMempoolPoller(
               txid,
               payload.payloadHex,
               payload.selectorHex,
+              payload.vsizeBytes,
             ]);
           } catch (err) {
             log('WARN', 'mempool', 'Failed to insert mempool_pending row', {

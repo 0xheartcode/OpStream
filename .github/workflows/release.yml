@@ -85,3 +85,10 @@ jobs:
           git commit -m "chore: release v${{ steps.version.outputs.new }} [skip ci]"
           git tag "v${{ steps.version.outputs.new }}"
           git push origin main --follow-tags
+
+      - name: Sync release commit back to dev
+        run: |
+          git fetch origin dev
+          git checkout dev
+          git merge origin/main --no-edit
+          git push origin dev

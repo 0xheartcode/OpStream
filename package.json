@@ -1,6 +1,6 @@
 {
   "name": "@opnet-collective/opstream",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Chain scanner & indexer for OPNET — RPC clients, bootstrap scanner, event store, candles, snapshots, pool readers, live indexer",
   "type": "module",
   "engines": {

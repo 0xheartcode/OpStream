@@ -10,6 +10,10 @@ Versioning:
 
 ---
 
+## [0.1.1] - 2026-04-16
+- release: workflow infrastructure, test fixes, mempool vsize_bytes (#4)
+
+
 ## [0.1.0] - 2026-04-16
 
 Initial tracked release. Prior history available via `git log`.

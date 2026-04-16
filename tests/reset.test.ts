@@ -90,7 +90,7 @@ describe('resetDatabase', () => {
     const tokens = await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM tokens');
     const metrics = await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM runtime_metrics');
     expect(Number(tokens?.n)).toBe(1);
-    expect(Number(metrics?.n)).toBe(42 === 42 ? 1 : 0); // row count, not value
+    expect(Number(metrics?.n)).toBe(1); // row count, not value
   });
 
   it('is idempotent — running twice is safe', async () => {

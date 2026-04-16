@@ -10,6 +10,10 @@ Versioning:
 
 ---
 
+## [0.1.2] - 2026-04-16
+- fix(lint): remove constant condition in reset.test.ts (#5)
+
+
 ## [0.1.1] - 2026-04-16
 - release: workflow infrastructure, test fixes, mempool vsize_bytes (#4)
 

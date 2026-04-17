@@ -96,7 +96,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add package.json package-lock.json CHANGELOG.md
           git commit -m "chore: release v${{ steps.version.outputs.new }} [skip ci]"
-          git tag "v${{ steps.version.outputs.new }}"
+          git tag -a "v${{ steps.version.outputs.new }}" -m "Release v${{ steps.version.outputs.new }}"
           # Release commit lands on dev
           git push origin dev --follow-tags
           # main fast-forwards to the same commit — Railway deploys from here

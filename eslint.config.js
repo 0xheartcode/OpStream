@@ -7,7 +7,7 @@ export default tseslint.config(
 
   // ── Base rules ────────────────────────────────────────────────────────────
   eslint.configs.recommended,
-  ...tseslint.configs.recommended,
+  ...tseslint.configs.recommendedTypeChecked,
 
   // ── Project-specific overrides ────────────────────────────────────────────
   {
@@ -25,6 +25,13 @@ export default tseslint.config(
       // Floating promises are real bugs in async code — enforce void/await.
       '@typescript-eslint/no-floating-promises': 'error',
 
+      // Passing async functions where sync is expected silently swallows errors.
+      '@typescript-eslint/no-misused-promises': 'error',
+
+      // Adapter pattern: async interface over sync backend (e.g. better-sqlite3).
+      '@typescript-eslint/require-await': 'off',
+
+
       // Unused vars are dead code. Prefix with _ to intentionally suppress.
       '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
 
@@ -40,6 +47,21 @@ export default tseslint.config(
     },
   },
 
+  // ── RPC parsing layer — JSON-RPC responses are inherently `any` ─────────────
+  // The unsafe-* rules fire on every .result/.error access on the raw HTTP
+  // response body. The right fix long-term is to type each response shape;
+  // until then, scope the suppression to just these files.
+  {
+    files: ['src/rpc/**/*.ts', 'src/indexer/wsSessionManager.ts'],
+    rules: {
+      '@typescript-eslint/no-unsafe-assignment':    'off',
+      '@typescript-eslint/no-unsafe-member-access':  'off',
+      '@typescript-eslint/no-unsafe-argument':      'off',
+      '@typescript-eslint/no-unsafe-return':        'off',
+      '@typescript-eslint/no-unsafe-call':          'off',
+    },
+  },
+
   // ── Relax rules in test files ─────────────────────────────────────────────
   {
     files: ['tests/**/*.ts'],
@@ -48,6 +70,14 @@ export default tseslint.config(
       '@typescript-eslint/no-explicit-any': 'off',
       // Tests intentionally use non-null assertions for clarity.
       '@typescript-eslint/no-non-null-assertion': 'off',
+      // Vitest spy matchers trigger false positives for unbound-method.
+      '@typescript-eslint/unbound-method': 'off',
+      // Tests inspect raw RPC/SQLite responses which are `any` typed.
+      '@typescript-eslint/no-unsafe-assignment':    'off',
+      '@typescript-eslint/no-unsafe-member-access':  'off',
+      '@typescript-eslint/no-unsafe-argument':      'off',
+      '@typescript-eslint/no-unsafe-return':        'off',
+      '@typescript-eslint/no-unsafe-call':          'off',
     },
   },
 );

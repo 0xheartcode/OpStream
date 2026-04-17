@@ -14,7 +14,6 @@ import {
   type InteractionTransaction,
   JSONRpcProvider,
   OPNetTransactionTypes,
-  type TransactionBase,
 } from 'opnet';
 import type { CallResult } from 'opnet';
 import type { ICallRequestError } from 'opnet';
@@ -160,7 +159,7 @@ export class OpnetRpcClient {
 
       const blockNumber = BigInt(block.height.toString());
 
-      for (const tx of block.transactions as TransactionBase<OPNetTransactionTypes>[]) {
+      for (const tx of block.transactions) {
         if (tx.OPNetType !== OPNetTransactionTypes.Interaction) continue;
 
         const itx = tx as InteractionTransaction;
@@ -218,7 +217,7 @@ export class OpnetRpcClient {
 
       const blockNumber = BigInt(block.height.toString());
 
-      for (const tx of block.transactions as TransactionBase<OPNetTransactionTypes>[]) {
+      for (const tx of block.transactions) {
         if (tx.OPNetType !== OPNetTransactionTypes.Interaction) continue;
 
         const itx = tx as InteractionTransaction;
@@ -272,7 +271,7 @@ export class OpnetRpcClient {
       return null;
     }
 
-    const cr = result as CallResult;
+    const cr = result;
     if (cr.revert) {
       log('WARN', 'rpc', 'call: contract reverted', {
         address,

@@ -13,7 +13,6 @@ import {
   type InteractionTransaction,
   type DeploymentTransaction,
   OPNetTransactionTypes,
-  type TransactionBase,
 } from 'opnet';
 import { log } from '../core/logger.js';
 import type { DbAdapter } from '../core/dbAdapter.js';
@@ -394,11 +393,11 @@ export async function scanBlockRange(
     const txRows: TxRow[] = [];
     const deployments: Array<{ blockNumber: number; txHash: string; contractAddr: string; deployer: string; bytecodeHash: string | null }> = [];
 
-    const blockTxs = block.transactions as TransactionBase<OPNetTransactionTypes>[];
+    const blockTxs = block.transactions;
     const outputRows: OutputRow[] = [];
 
     for (let txIndex = 0; txIndex < blockTxs.length; txIndex++) {
-      const tx = blockTxs[txIndex]!;
+      const tx = blockTxs[txIndex];
 
       const txAsInteraction = tx as InteractionTransaction;
       const fromAddress  = txAsInteraction.from          ? String(txAsInteraction.from) : null;

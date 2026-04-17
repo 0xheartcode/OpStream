@@ -265,6 +265,7 @@ async function main(): Promise<void> {
       const stopPromises: Promise<void>[] = [];
 
       // Start mempool poller first so indexer can call markConfirmed on it
+      // eslint-disable-next-line @typescript-eslint/consistent-type-imports
       let mempoolHandleSL: Awaited<ReturnType<typeof import('./indexer/mempoolPoller.js').startMempoolPoller>> | null = null;
       if (runMempool) {
         const { BitcoinRpcClient } = await import('./rpc/btcRpc.js');
@@ -407,6 +408,7 @@ async function main(): Promise<void> {
       const stopPromises: Promise<void>[] = [];
 
       // Start mempool poller first so indexer can call markConfirmed on it
+      // eslint-disable-next-line @typescript-eslint/consistent-type-imports
       let mempoolHandleStart: Awaited<ReturnType<typeof import('./indexer/mempoolPoller.js').startMempoolPoller>> | null = null;
       if (runMempool) {
         const { BitcoinRpcClient } = await import('./rpc/btcRpc.js');
@@ -495,6 +497,7 @@ async function main(): Promise<void> {
       const stopPromises: Promise<void>[] = [];
 
       // Start mempool poller first so indexer can call markConfirmed on it
+      // eslint-disable-next-line @typescript-eslint/consistent-type-imports
       let mempoolHandleLive: Awaited<ReturnType<typeof import('./indexer/mempoolPoller.js').startMempoolPoller>> | null = null;
       if (runMempool) {
         const { BitcoinRpcClient } = await import('./rpc/btcRpc.js');

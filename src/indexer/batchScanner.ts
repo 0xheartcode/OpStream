@@ -334,6 +334,7 @@ export async function runBatchScan(
   }
 
   const localCheckpoint = await getLocalCheckpoint(db);
+  // eslint-disable-next-line @typescript-eslint/prefer-nullish-coalescing
   const startBlock = opts.fromBlock !== undefined
     ? opts.fromBlock
     : (localCheckpoint !== null ? localCheckpoint + 1 : 0);

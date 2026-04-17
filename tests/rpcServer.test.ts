@@ -51,6 +51,7 @@ function nodePost(url: string, body: unknown): Promise<{ status: number; body: u
     }, (res) => {
       let raw = '';
       res.on('data', (chunk: string) => { raw += chunk; });
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
       res.on('end', () => { try { resolve({ status: res.statusCode ?? 0, body: JSON.parse(raw) }); } catch (e) { reject(e); } });
     });
     req.on('error', reject);
@@ -395,8 +396,8 @@ describe('opstream_getBlockReceipts', () => {
   it('transactions are ordered by tx_index', async () => {
     const { body } = await rpc(url, 'opstream_getBlockReceipts', [941400]);
     const txs = body.result.transactions as Array<{ hash: string }>;
-    expect(txs[0]!.hash).toBe('txA');
-    expect(txs[1]!.hash).toBe('txB');
+    expect(txs[0].hash).toBe('txA');
+    expect(txs[1].hash).toBe('txB');
   });
 
   it('events nested under correct transaction', async () => {
@@ -404,7 +405,7 @@ describe('opstream_getBlockReceipts', () => {
     const txA = (body.result.transactions as Array<{ hash: string; events: Array<{ type: string }> }>)
       .find((t) => t.hash === 'txA')!;
     expect(txA.events).toHaveLength(1);
-    expect(txA.events[0]!.type).toBe('Swap');
+    expect(txA.events[0].type).toBe('Swap');
   });
 
   it('"latest" resolves via checkpoint', async () => {
@@ -639,10 +640,10 @@ describe('opstream_getBlockByNumber', () => {
     const { body } = await rpc(url, 'opstream_getBlockByNumber', [941500, true]);
     const txs = body.result.transactions as Array<{ hash: string; events: unknown[] }>;
     expect(txs).toHaveLength(2);
-    expect(txs[0]!.hash).toBe('txBN_A');
-    expect(txs[0]!.events).toHaveLength(1);
-    expect(txs[1]!.hash).toBe('txBN_B');
-    expect(txs[1]!.events).toHaveLength(0);
+    expect(txs[0].hash).toBe('txBN_A');
+    expect(txs[0].events).toHaveLength(1);
+    expect(txs[1].hash).toBe('txBN_B');
+    expect(txs[1].events).toHaveLength(0);
   });
 
   it('"latest" resolves via checkpoint', async () => {
@@ -692,7 +693,7 @@ describe('opstream_getBlockByHash', () => {
   it('includeTx=true expands transactions', async () => {
     const { body } = await rpc(url, 'opstream_getBlockByHash', ['blockhash_941600', true]);
     const txs = body.result.transactions as Array<{ hash: string }>;
-    expect(txs[0]!.hash).toBe('txBH_A');
+    expect(txs[0].hash).toBe('txBH_A');
   });
 
   it('non-string param → -32602', async () => {
@@ -1015,7 +1016,7 @@ describe('opstream_getTransactionStatus', () => {
   // Also seed the transactions table with txConfirmed so the block-number
   // fallback path can resolve it.
   beforeAll(async () => {
-    db = await createTestDb();
+    db = createTestDb();
 
     await db.run(`
       INSERT INTO mempool_pending (txid, raw_payload_hex, contract_selector, confirmed_at, pruned_at)

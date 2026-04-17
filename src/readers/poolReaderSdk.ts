@@ -12,7 +12,6 @@ import type {
   IMotoswapPoolContract,
   IMotoswapFactoryContract,
   INativeSwapContract,
-  PublicKeyInfo,
 } from 'opnet';
 import type { BitcoinInterfaceAbi } from 'opnet';
 import { networks } from '@btc-vision/bitcoin';
@@ -172,8 +171,8 @@ export async function resolveTokenHexAddress(
   try {
     const raw = await provider.getPublicKeysInfoRaw(address);
     const info = raw[address];
-    if (info && 'tweakedPubkey' in info && (info as PublicKeyInfo).tweakedPubkey) {
-      return '0x' + (info as PublicKeyInfo).tweakedPubkey;
+    if (info && 'tweakedPubkey' in info && (info).tweakedPubkey) {
+      return '0x' + (info).tweakedPubkey;
     }
   } catch {
     // fall through — return original on failure
@@ -195,10 +194,10 @@ export async function readNativeSwapReserves(
     const { Address } = await import('@btc-vision/transaction');
     const raw = await provider.getPublicKeysInfoRaw(tokenAddress);
     const info = raw[tokenAddress];
-    if (!info || !('tweakedPubkey' in info) || !(info as PublicKeyInfo).tweakedPubkey) {
+    if (!info || !('tweakedPubkey' in info) || !(info).tweakedPubkey) {
       throw new Error(`No tweaked pubkey for ${tokenAddress}`);
     }
-    const addr = Address.fromString((info as PublicKeyInfo).tweakedPubkey!);
+    const addr = Address.fromString((info).tweakedPubkey);
 
     const contract = getContract<INativeSwapContract>(
       factoryAddress,

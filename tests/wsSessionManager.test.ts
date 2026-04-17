@@ -51,7 +51,7 @@ function decodeFrame(buf: Buffer): unknown {
   // Server frames are NOT masked.
   // byte 0: FIN + opcode (0x81 = text)
   // byte 1: payload length (< 126 for test messages)
-  const payloadLen = buf[1]! & 0x7f;
+  const payloadLen = buf[1] & 0x7f;
   const payload    = buf.subarray(2, 2 + payloadLen);
   return JSON.parse(payload.toString('utf8'));
 }
@@ -80,6 +80,7 @@ function connect(mgr: WsSessionManager): { socket: MockSocket; writes: Buffer[] 
   const socket = new MockSocket();
   const writes: Buffer[] = [];
   socket.on('_serverWrite', (chunk: Buffer) => { writes.push(chunk); });
+  // eslint-disable-next-line @typescript-eslint/consistent-type-imports
   mgr.addConnection(socket as unknown as import('node:stream').Duplex);
   return { socket, writes };
 }
@@ -97,7 +98,7 @@ function readResponses(writes: Buffer[]): unknown[] {
   let offset = 0;
   while (offset < combined.length) {
     if (combined.length - offset < 2) break;
-    const b1 = combined[offset + 1]!;
+    const b1 = combined[offset + 1];
     const lenByte = b1 & 0x7f;
     let payloadLen: number;
     let headerLen: number;
@@ -344,7 +345,7 @@ describe('WsSessionManager', () => {
     // Server should have written a pong (opcode 0x8A)
     const combined = Buffer.concat(writes);
     expect(combined.length).toBeGreaterThan(0);
-    expect(combined[0]! & 0x0f).toBe(0x0a); // pong opcode
+    expect(combined[0] & 0x0f).toBe(0x0a); // pong opcode
   });
 
   it('silently ignores malformed JSON from client', () => {

@@ -154,17 +154,17 @@ describe('mempoolPoller', () => {
       'SELECT txid, contract_selector, vsize_bytes FROM mempool_pending',
     );
     expect(rows.length).toBe(1);
-    expect(rows[0]!.txid).toBe('txid_opnet_1');
-    expect(rows[0]!.contract_selector).toBe('0xdeadbeef');
+    expect(rows[0].txid).toBe('txid_opnet_1');
+    expect(rows[0].contract_selector).toBe('0xdeadbeef');
     // vsize_bytes must be stored and be a positive integer
-    expect(rows[0]!.vsize_bytes).not.toBeNull();
-    expect(rows[0]!.vsize_bytes).toBeGreaterThan(0);
+    expect(rows[0].vsize_bytes).not.toBeNull();
+    expect(rows[0].vsize_bytes).toBeGreaterThan(0);
 
     // Check webhook event dispatched
     expect(events.length).toBe(1);
-    expect(events[0]!.blockNumber).toBe(-1);
-    expect(events[0]!.txHash).toBe('txid_opnet_1');
-    expect(events[0]!.eventName).toBe('MempoolPending');
+    expect(events[0].blockNumber).toBe(-1);
+    expect(events[0].txHash).toBe('txid_opnet_1');
+    expect(events[0].eventName).toBe('MempoolPending');
   });
 
   it('does not re-fetch already-seen txids', async () => {

@@ -111,7 +111,7 @@ describe('scanBlockRange', () => {
 
       const txs = await db.all<{ tx_type: string; tx_hash: string }>('SELECT tx_type, tx_hash FROM transactions ORDER BY tx_hash');
       expect(txs).toHaveLength(1);
-      expect(txs[0]!.tx_type).toBe('interaction');
+      expect(txs[0].tx_type).toBe('interaction');
 
       // No generic outputs should have been inserted either
       const outs = await db.all<{ tx_hash: string }>("SELECT tx_hash FROM tx_outputs WHERE tx_hash LIKE 'tx_g%'");
@@ -147,7 +147,7 @@ describe('scanBlockRange', () => {
       await scanBlockRange(db, fakeClient(fakeBlock([fakeInteractionTx()])), 100n, 100n, { onEvent });
 
       expect(captured).toHaveLength(1);
-      const e = captured[0]!;
+      const e = captured[0];
       expect(e.blockNumber).toBe(100);
       expect(e.txHash).toBe('tx_abc');
       expect(e.contractAddress).toBe('bc1qcontract');
@@ -171,8 +171,8 @@ describe('scanBlockRange', () => {
         onEvent: (e) => captured.push(e),
       });
 
-      expect(captured[0]!.failed).toBe(true);
-      expect(captured[0]!.revertReason).toBe('InsufficientFunds');
+      expect(captured[0].failed).toBe(true);
+      expect(captured[0].revertReason).toBe('InsufficientFunds');
     });
 
     it('logIndex increments globally across all events in a tx', async () => {
@@ -231,7 +231,7 @@ describe('scanBlockRange', () => {
         onEvent: (e) => captured.push(e),
       });
 
-      expect(captured[0]!.eventRaw).toBe('0xcafebabe');
+      expect(captured[0].eventRaw).toBe('0xcafebabe');
     });
 
     it('does not call onEvent when block has no interaction txs', async () => {

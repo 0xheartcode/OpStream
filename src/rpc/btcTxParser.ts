@@ -78,7 +78,7 @@ class BufferCursor {
 
   readUInt8(): number {
     if (this.remaining < 1) throw new Error('BufferCursor: underflow (uint8)');
-    return this.buf[this.offset++]!;
+    return this.buf[this.offset++];
   }
 
   readUInt16LE(): number {
@@ -132,7 +132,7 @@ function readScriptElement(
 ): { opcode: number; data: Buffer | null } | null {
   if (cursor.pos >= script.length) return null;
 
-  const opcode = script[cursor.pos++]!;
+  const opcode = script[cursor.pos++];
 
   // Direct push: 0x01..0x4b = push next N bytes
   if (opcode >= 0x01 && opcode <= 0x4b) {
@@ -146,7 +146,7 @@ function readScriptElement(
   // OP_PUSHDATA1
   if (opcode === 0x4c) {
     if (cursor.pos >= script.length) return null;
-    const len = script[cursor.pos++]!;
+    const len = script[cursor.pos++];
     const end = cursor.pos + len;
     if (end > script.length) return null;
     const data = script.subarray(cursor.pos, end);
@@ -326,9 +326,9 @@ function parseWitnessStacks(rawHex: string): { witnesses: Buffer[][]; vsizeBytes
  */
 function isTaprootScriptPath(stack: Buffer[]): boolean {
   if (stack.length < 2) return false;
-  const controlBlock = stack[stack.length - 1]!;
+  const controlBlock = stack[stack.length - 1];
   if (controlBlock.length < 33) return false; // min: 1 byte version + 32 byte internal key
-  const leafVersion = controlBlock[0]! & 0xfe; // mask off parity bit
+  const leafVersion = controlBlock[0] & 0xfe; // mask off parity bit
   return leafVersion === 0xc0;
 }
 
@@ -337,7 +337,7 @@ function isTaprootScriptPath(stack: Buffer[]): boolean {
  * The tapscript is the second-to-last element.
  */
 function getTapscript(stack: Buffer[]): Buffer {
-  return stack[stack.length - 2]!;
+  return stack[stack.length - 2];
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────────

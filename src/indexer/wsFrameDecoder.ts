@@ -52,8 +52,8 @@ export class WsFrameDecoder extends EventEmitter {
   private _drain(): void {
     // Keep parsing frames as long as the buffer has enough bytes for at least a header.
     while (this._buf.length >= 2) {
-      const b0 = this._buf[0]!;
-      const b1 = this._buf[1]!;
+      const b0 = this._buf[0];
+      const b1 = this._buf[1];
 
       // const _fin = (b0 & 0x80) !== 0; // FIN bit — ignored for now (no fragmentation support)
       const opcodeByte = b0 & 0x0f;

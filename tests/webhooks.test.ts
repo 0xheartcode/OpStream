@@ -33,7 +33,7 @@ function enrichedEvent(overrides: Partial<WebhookEvent> = {}): WebhookEvent {
  */
 function decodeWsFrame(buf: Buffer): string {
   let offset = 2;
-  let payloadLen = (buf[1]! & 0x7f);
+  let payloadLen = (buf[1] & 0x7f);
   if (payloadLen === 126) {
     payloadLen = buf.readUInt16BE(2);
     offset = 4;
@@ -72,7 +72,7 @@ describe('SubscriptionManager', () => {
       manager.dispatch(enrichedEvent());
 
       expect(received).toHaveLength(1);
-      const e = received[0]!;
+      const e = received[0];
       expect(e.blockNumber).toBe(100);
       expect(e.txHash).toBe('tx_abc');
       expect(e.contractAddress).toBe('bc1qcontract');
@@ -85,7 +85,7 @@ describe('SubscriptionManager', () => {
 
       manager.dispatch(enrichedEvent());
 
-      const e = received[0]!;
+      const e = received[0];
       expect(e.logIndex).toBe(0);
       expect(e.blockTimestamp).toBe(1_700_000_000);
       expect(e.txIndex).toBe(2);
@@ -103,8 +103,8 @@ describe('SubscriptionManager', () => {
 
       manager.dispatch(enrichedEvent({ failed: true, revertReason: 'OutOfGas' }));
 
-      expect(received[0]!.failed).toBe(true);
-      expect(received[0]!.revertReason).toBe('OutOfGas');
+      expect(received[0].failed).toBe(true);
+      expect(received[0].revertReason).toBe('OutOfGas');
     });
 
     it('dispatches multiple events independently', () => {
@@ -175,17 +175,17 @@ describe('SubscriptionManager', () => {
 
       for (let i = 0; i < sockets.length; i++) {
         const idx = i;
-        sockets[i]!.on('data', (chunk: Buffer) => {
-          received[idx]!.push(decodeWsFrame(chunk));
+        sockets[i].on('data', (chunk: Buffer) => {
+          received[idx].push(decodeWsFrame(chunk));
         });
-        (manager as { _wsClients: Set<(typeof sockets)[0]> })._wsClients.add(sockets[i]!);
+        (manager as { _wsClients: Set<(typeof sockets)[0]> })._wsClients.add(sockets[i]);
       }
 
       manager.dispatch(enrichedEvent());
 
       for (const msgs of received) {
         expect(msgs).toHaveLength(1);
-        const parsed = JSON.parse(msgs[0]!) as WebhookEvent;
+        const parsed = JSON.parse(msgs[0]) as WebhookEvent;
         expect(parsed.eventRaw).toBe('0xdeadbeef');
       }
     });

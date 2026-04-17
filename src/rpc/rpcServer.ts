@@ -447,14 +447,14 @@ async function handleGetLogs(
     const rawAddr = filter['address'] ?? filter['contractAddress'];
     const contract: string | string[] | undefined =
       typeof rawAddr === 'string'                                  ? rawAddr :
-      Array.isArray(rawAddr) && rawAddr.every(a => typeof a === 'string') ? rawAddr as string[] :
+      Array.isArray(rawAddr) && rawAddr.every(a => typeof a === 'string') ? rawAddr :
       undefined;
 
     // eventName — accept single string or array
     const rawName = filter['eventName'];
     const eventName: string | string[] | undefined =
       typeof rawName === 'string'                                   ? rawName :
-      Array.isArray(rawName) && rawName.every(n => typeof n === 'string') ? rawName as string[] :
+      Array.isArray(rawName) && rawName.every(n => typeof n === 'string') ? rawName :
       undefined;
 
     const limit = typeof filter['limit'] === 'number' && filter['limit'] > 0
@@ -559,7 +559,7 @@ async function handleGetTransaction(
   db: DbAdapter,
 ): Promise<JsonRpcResponse> {
   if (!Array.isArray(params) || typeof params[0] !== 'string') return fail(id, INVALID_PARAMS);
-  const txHash = params[0] as string;
+  const txHash = params[0];
 
   try {
     const txRow = await db.get<TxDbRow>(

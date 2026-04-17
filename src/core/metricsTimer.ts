@@ -27,8 +27,8 @@ export function startMetricsLogger(config: OpStreamConfig, db: Database.Database
   }, intervalMs);
 
   // Don't keep the Node process alive solely for this timer.
-  if (typeof (timer as NodeJS.Timeout).unref === 'function') {
-    (timer as NodeJS.Timeout).unref();
+  if (typeof (timer).unref === 'function') {
+    (timer).unref();
   }
 
   return () => clearInterval(timer);

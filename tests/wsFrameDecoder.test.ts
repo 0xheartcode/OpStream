@@ -83,8 +83,8 @@ describe('WsFrameDecoder', () => {
 
     const frames = collectFrames(decoder, frame);
     expect(frames).toHaveLength(1);
-    expect(frames[0]!.opcode).toBe('text');
-    expect(frames[0]!.payload.toString('utf8')).toBe(text);
+    expect(frames[0].opcode).toBe('text');
+    expect(frames[0].payload.toString('utf8')).toBe(text);
   });
 
   it('correctly unmasks payload using a non-zero mask key', () => {
@@ -95,7 +95,7 @@ describe('WsFrameDecoder', () => {
 
     const frames = collectFrames(decoder, frame);
     expect(frames).toHaveLength(1);
-    expect(frames[0]!.payload.toString('utf8')).toBe(text);
+    expect(frames[0].payload.toString('utf8')).toBe(text);
   });
 
   it('emits ping frame with correct opcode', () => {
@@ -106,8 +106,8 @@ describe('WsFrameDecoder', () => {
 
     const frames = collectFrames(decoder, frame);
     expect(frames).toHaveLength(1);
-    expect(frames[0]!.opcode).toBe('ping');
-    expect(frames[0]!.payload).toEqual(pingData);
+    expect(frames[0].opcode).toBe('ping');
+    expect(frames[0].payload).toEqual(pingData);
   });
 
   it('emits close frame with correct opcode', () => {
@@ -116,7 +116,7 @@ describe('WsFrameDecoder', () => {
 
     const frames = collectFrames(decoder, frame);
     expect(frames).toHaveLength(1);
-    expect(frames[0]!.opcode).toBe('close');
+    expect(frames[0].opcode).toBe('close');
   });
 
   it('silently drops unknown opcodes', () => {
@@ -148,7 +148,7 @@ describe('WsFrameDecoder', () => {
 
     decoder.feed(full.subarray(mid));      // second half — complete
     expect(allFrames).toHaveLength(1);
-    expect(allFrames[0]!.payload.toString('utf8')).toBe(text);
+    expect(allFrames[0].payload.toString('utf8')).toBe(text);
   });
 
   it('parses two consecutive frames from a single chunk', () => {
@@ -158,8 +158,8 @@ describe('WsFrameDecoder', () => {
 
     const frames = collectFrames(decoder, Buffer.concat([a, b]));
     expect(frames).toHaveLength(2);
-    expect(frames[0]!.payload.toString()).toBe('frame-A');
-    expect(frames[1]!.payload.toString()).toBe('frame-B');
+    expect(frames[0].payload.toString()).toBe('frame-A');
+    expect(frames[1].payload.toString()).toBe('frame-B');
   });
 
   it('decodes a 126-length extended frame correctly', () => {
@@ -169,11 +169,11 @@ describe('WsFrameDecoder', () => {
     const frame   = makeTextFrame(text);
 
     // Verify our helper encoded it with the 16-bit extended length
-    expect(frame[1]! & 0x7f).toBe(126);
+    expect(frame[1] & 0x7f).toBe(126);
 
     const frames = collectFrames(decoder, frame);
     expect(frames).toHaveLength(1);
-    expect(frames[0]!.payload.toString('utf8')).toBe(text);
+    expect(frames[0].payload.toString('utf8')).toBe(text);
   });
 
   it('decodes a 127-length (32-bit) extended frame correctly', () => {
@@ -182,12 +182,12 @@ describe('WsFrameDecoder', () => {
     const text    = 'y'.repeat(65536);
     const frame   = makeTextFrame(text);
 
-    expect(frame[1]! & 0x7f).toBe(127);
+    expect(frame[1] & 0x7f).toBe(127);
 
     const frames = collectFrames(decoder, frame);
     expect(frames).toHaveLength(1);
-    expect(frames[0]!.payload.length).toBe(65536);
-    expect(frames[0]!.payload.toString('utf8')).toBe(text);
+    expect(frames[0].payload.length).toBe(65536);
+    expect(frames[0].payload.toString('utf8')).toBe(text);
   });
 
   it('handles an unmasked frame gracefully (server→server scenario)', () => {
@@ -202,6 +202,6 @@ describe('WsFrameDecoder', () => {
 
     const frames = collectFrames(decoder, raw);
     expect(frames).toHaveLength(1);
-    expect(frames[0]!.payload.toString('utf8')).toBe(text);
+    expect(frames[0].payload.toString('utf8')).toBe(text);
   });
 });
